@@ -8,7 +8,7 @@ import copy
 import os
 
 from tic_tac_toe_bolt.model import PolicyValueNet
-from tic_tac_toe_bolt.mcts import MCTS
+from tic_tac_toe_bolt.mcts import MCTS, MCTS_CPP
 import tic_tac_toe_bolt # Register env
 
 class TrainPipeline:
@@ -121,7 +121,18 @@ class TrainPipeline:
         and store the self-play data: (state, mcts_probs, z) for training
         """
         env.reset()
-        mcts = MCTS(self.policy_value_fn, self.c_puct, self.n_playout)
+        
+        # Save model for C++ MCTS
+        model_path = "temp_model.pt"
+        script_model = torch.jit.script(self.policy_value_net)
+        script_model.save(model_path)
+        
+        try:
+            mcts = MCTS_CPP(model_path, self.c_puct, self.n_playout, device=self.device)
+        except Exception as e:
+            print(f"Failed to use C++ MCTS: {e}. Falling back to Python MCTS.")
+            mcts = MCTS(self.policy_value_fn, self.c_puct, self.n_playout)
+            
         states, mcts_probs, current_players = [], [], []
         
         while True:

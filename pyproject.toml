@@ -1,7 +1,7 @@
 [project]
 name = "tic-tac-toe-bolt"
 version = "0.1.0"
-description = "Infinite Tic Tac Toe Gymnasium Environment"
+description = "Infinite Tic Tac Toe Gymnasium Environment with AlphaZero-style AI"
 dependencies = [
     "gymnasium",
     "numpy",
@@ -10,5 +10,5 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools", "wheel", "torch"]
 build-backend = "setuptools.build_meta"

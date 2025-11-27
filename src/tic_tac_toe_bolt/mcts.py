@@ -1,6 +1,10 @@
 import numpy as np
 import torch
 import copy
+try:
+    from tic_tac_toe_bolt import _mcts_cpp
+except ImportError:
+    _mcts_cpp = None
 
 def softmax(x):
     probs = np.exp(x - np.max(x))
@@ -100,37 +104,12 @@ class MCTS:
             action, node = node.select(self._c_puct)
             obs, reward, terminated, truncated, info = state.step(action)
             if terminated:
-                # If game ended, reward is 1 for current player (who just moved), so -1 for next player?
-                # In our env, reward is 1 if the move wins.
-                # So the player who made the move won.
-                # The value for the NEXT player (whose turn it would be) is -1.
-                # But `state.step` switches the player internally.
-                # So if `terminated` is True, the game is over.
-                # The value returned should be from the perspective of the player who would play next.
-                # If P1 moved and won, it's now P2's turn (conceptually), but game is over.
-                # P2 sees a loss (-1).
                 leaf_value = -1.0 
                 node.update_recursive(-leaf_value)
                 return
 
         # 2. Expansion and Evaluation
-        # Evaluate the leaf using a network which outputs a list of
-        # (action, probability) tuples and a score for the current player.
-        # Check if game is already over (e.g. draw or win just happened in the last step of selection?)
-        # Actually, if we broke out of while loop because node is leaf, the game might not be over.
-        
-        # We need to check valid moves.
-        # In our env, all 9 moves are "valid" in action space, but some are illegal (occupied).
-        # The NN should learn to assign 0 prob to illegal moves.
-        # But MCTS should also filter them?
-        # Our env returns -10 reward for illegal move and doesn't change state.
-        # We should probably mask illegal moves here.
-        
         action_probs, leaf_value = self._policy(state)
-        
-        # Check for end of game (if state is terminal but not caught in selection loop - e.g. root was leaf)
-        # But we can't easily check terminal without stepping.
-        # Assuming _policy handles evaluation.
         
         node.expand(action_probs)
         
@@ -169,5 +148,36 @@ class MCTS:
     def __str__(self):
         return "MCTS"
 
-# We need to refine _playout to work with the Gym env.
-# And we need a policy_value_fn wrapper that converts the NN output to what MCTS expects.
+class MCTS_CPP:
+    def __init__(self, model_path, c_puct=5, n_playout=10000, device="cpu"):
+        if _mcts_cpp is None:
+            raise ImportError("C++ extension not found. Please build it first.")
+        self._mcts = _mcts_cpp.MCTS(model_path, c_puct, n_playout, str(device))
+    
+    def get_move_probs(self, env, temp=1e-3):
+        # Convert env state to C++ state
+        cpp_state = self._convert_env_to_cpp_state(env)
+        acts, probs = self._mcts.get_move_probs(cpp_state, temp)
+        return acts, probs
+
+    def update_with_move(self, last_move):
+        self._mcts.update_with_move(last_move)
+
+    def _convert_env_to_cpp_state(self, env):
+        # Assuming env is TicTacToeBoltEnv
+        cpp_state = _mcts_cpp.TicTacToeState()
+        
+        unwrapped = env.unwrapped
+        
+        # Convert board to list of lists
+        board_list = unwrapped.board.tolist()
+        
+        # Convert player_moves to required format
+        # Python dict: {1: [(r, c), ...], -1: [...]}
+        # C++ map: int -> vector<pair<int, int>>
+        # Pybind11 handles dict -> map and list of tuples -> vector of pairs automatically if types match
+        player_moves = unwrapped.player_moves
+        
+        cpp_state.set_state(board_list, unwrapped.current_player, player_moves)
+        
+        return cpp_state
