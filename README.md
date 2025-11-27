@@ -1,79 +1,89 @@
 # Tic Tac Toe Bolt
 
-**Tic Tac Toe Bolt** is an implementation of "Infinite Tic Tac Toe" as a Gymnasium environment, featuring an AlphaZero-style AI agent.
+**Tic Tac Toe Bolt** is a reinforcement learning project that implements "Infinite Tic Tac Toe" (where a player can have at most 3 marks, and the oldest disappears on the 4th move) as a Gymnasium environment. It features an AlphaZero-style AI agent trained via self-play and Monte Carlo Tree Search (MCTS).
 
-## Game Rules
-- **Grid**: 3x3.
-- **Players**: 2 (X and O).
-- **Infinite Mechanic**: Each player can have at most **3 marks** on the board. When a player places a 4th mark, their **oldest mark disappears**.
-- **Win Condition**: 3 marks in a row, column, or diagonal.
+## Project Overview
 
-## Installation
+*   **Domain**: Infinite Tic Tac Toe (3x3 grid, max 3 marks per player).
+*   **Core Logic**: Implemented as a custom Gymnasium environment (`TicTacToeBolt-v0`).
+*   **AI Architecture**: AlphaZero (ResNet/CNN backbone with dual Policy/Value heads + MCTS).
+*   **Performance**: Includes a C++ extension (`_mcts_cpp`) for high-performance MCTS during inference/training, supporting both CPU and CUDA.
 
-1.  **Clone the repository**:
-    ```bash
-    git clone <repository_url>
-    cd tic_tac_toe_bolt
-    ```
+## Directory Structure
 
-2.  **Create a virtual environment**:
-    ```bash
-    python3 -m venv .venv
-    source .venv/bin/activate
-    ```
+*   `src/tic_tac_toe_bolt/`: Main source code.
+    *   `env.py`: Gymnasium environment implementation.
+    *   `model.py`: PyTorch Policy/Value Neural Network (CNN).
+    *   `mcts.py`: Pure Python MCTS implementation.
+    *   `mcts_cpp/`: C++ source for the optimized MCTS extension.
+    *   `train.py`: Main training loop (Self-Play -> Optimize -> Evaluate).
+    *   `play.py`: CLI script for human vs. AI play.
+*   `tests/`: Unit and integration tests.
+    *   `test_mechanics.py`: Verifies game rules (infinite mechanic, win conditions).
+    *   `test_model.py`: Verifies NN architecture and forward pass.
+    *   `test_mcts_cpp.py`: Verifies C++ MCTS bindings.
+    *   `performance_benchmark.py`: Benchmarks Python vs C++ MCTS performance.
+*   `play_match.py`: Script to pit two models against each other.
 
-3.  **Install dependencies**:
-    ```bash
-    pip install .
-    ```
+## Development & Usage
 
-## Usage
+### 1. Installation
 
-### Play Against AI
-You can play against the AI (trained or untrained) using the play script.
+The project uses `setuptools` and builds a C++ extension.
 
 ```bash
-# Play against an untrained agent (random/initial weights)
-python3 src/tic_tac_toe_bolt/play.py
+# Create venv
+python3 -m venv .venv
+source .venv/bin/activate
 
-# Play against a trained model
-python3 src/tic_tac_toe_bolt/play.py --model current_policy_50.pth
-
-# Let AI start first
-python3 src/tic_tac_toe_bolt/play.py --ai_starts
+# Install (compiles C++ extension)
+pip install .
 ```
 
-### Train the AI
-To train the agent using AlphaZero (Self-Play + MCTS + Neural Network):
+### 2. Training the AI
+
+Start the AlphaZero training loop:
 
 ```bash
 python3 src/tic_tac_toe_bolt/train.py
 ```
-This will generate `.pth` model checkpoints (e.g., `current_policy_50.pth`).
+*   Generates checkpoints (e.g., `current_policy_50.pth`).
+*   The training script automatically detects if CUDA is available and utilizes the C++ MCTS extension on the appropriate device.
 
-### Run Random Agent
-To verify the environment with a random agent:
+### 3. Playing
 
+**Human vs. AI:**
 ```bash
-python3 tests/random_agent.py
+# Play against random/untrained
+python3 src/tic_tac_toe_bolt/play.py
+
+# Play against a specific model
+python3 src/tic_tac_toe_bolt/play.py --model current_policy_50.pth --ai_starts
 ```
 
-### Run Tests
-To verify the game mechanics and model:
+**Model vs. Model:**
+```bash
+python3 play_match.py --model1 current_policy_50.pth --model2 current_policy_100.pth --n_games 100
+```
+
+### 4. Testing
+
+Run verification scripts to ensure game logic and model integrity:
 
 ```bash
-# Verify Infinite Mechanic
+# Test Game Logic
 python3 tests/test_mechanics.py
 
-# Verify Neural Network Forward Pass
-python3 tests/test_model.py
+# Test C++ Integration
+python3 tests/test_mcts_cpp.py
+
+# Benchmark Performance (Python vs C++ MCTS)
+python3 tests/performance_benchmark.py
 ```
 
-## Project Structure
-- `src/tic_tac_toe_bolt/`:
-    - `env.py`: Gymnasium environment implementation.
-    - `model.py`: PyTorch Policy/Value Neural Network.
-    - `mcts.py`: Monte Carlo Tree Search implementation.
-    - `train.py`: AlphaZero training loop.
-    - `play.py`: Script to play against the AI.
-- `tests/`: Verification scripts.
+## Implementation Details
+
+*   **State Representation**: The board is represented as a 3x3x3 tensor (Channel 0: Player Marks, Channel 1: Opponent Marks, Channel 2: All 1s/0s for turn or bias).
+*   **C++ Extension**: The `_mcts_cpp` module is built from `src/tic_tac_toe_bolt/mcts_cpp/mcts.cpp` using `torch.utils.cpp_extension`. It interacts with the Python environment by converting the Python board state into a C++ representation.
+    *   **Device Support**: The C++ MCTS class is device-aware. It accepts a device string (e.g., "cuda" or "cpu") during initialization and ensures the TorchScript model and input tensors are on the correct device for inference.
+*   **Model Loading**: The `play_match.py` and `play.py` scripts gracefully handle missing models by falling back to random/untrained behavior, but warning the user.
