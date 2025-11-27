@@ -87,7 +87,8 @@ public:
         // Convert board to tensor for NN input
         // Input shape: (1, 3, 3, 3) -> (Batch, Channels, H, W)
         // Channels: 
-        // 0: Current player's pieces with age encoding (0.33=oldest, 0.66=mid, 1.0=newest)
+        // 0: Current player's pieces with age encoding (Newest=1.0, Mid=0.66, Oldest=0.33)
+        //    (Values depend on count: 1 move=[1.0], 2 moves=[0.66, 1.0], 3 moves=[0.33, 0.66, 1.0])
         // 1: Opponent's pieces with age encoding
         // 2: All 1.0 (indicating it's the current player's turn to move)
         
