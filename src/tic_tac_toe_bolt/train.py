@@ -6,10 +6,94 @@ import random
 from collections import deque
 import copy
 import os
+import concurrent.futures
+import time # Import time module
 
 from tic_tac_toe_bolt.model import PolicyValueNet
 from tic_tac_toe_bolt.mcts import MCTS, MCTS_CPP
 import tic_tac_toe_bolt # Register env
+
+def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_games_to_play_per_worker):
+    """ Worker function for parallel self-play """
+    env = gym.make("TicTacToeBolt-v0")
+    
+    use_cpp = True
+    try:
+        mcts = MCTS_CPP(model_path, c_puct, n_playout, device_str)
+    except Exception as e:
+        print(f"Worker failed to use C++ MCTS: {e}. Falling back to Python MCTS.")
+        use_cpp = False
+        device = torch.device(device_str)
+        policy_value_net = torch.jit.load(model_path, map_location=device)
+        
+        def policy_value_fn(env):
+            board = env.unwrapped.board
+            legal_positions = []
+            for i in range(9):
+                if board[i // 3, i % 3] == 0:
+                    legal_positions.append(i)
+            
+            current_player = env.unwrapped.current_player
+            canonical_board = board * current_player
+            
+            input_board = np.zeros((1, 3, 3, 3))
+            input_board[0, 0, :, :] = (canonical_board == 1)
+            input_board[0, 1, :, :] = (canonical_board == -1)
+            input_board[0, 2, :, :] = 1.0
+            
+            input_tensor = torch.FloatTensor(input_board).to(device)
+            
+            with torch.no_grad():
+                output = policy_value_net(input_tensor)
+                log_act_probs, value = output
+                act_probs = np.exp(log_act_probs.cpu().numpy().flatten())
+                
+            return zip(legal_positions, act_probs[legal_positions]), value.item()
+            
+        mcts = MCTS(policy_value_fn, c_puct, n_playout)
+
+    all_play_data = []
+    for _ in range(num_games_to_play_per_worker):
+        env.reset()
+        mcts.update_with_move(-1) # Reset MCTS tree for new game
+
+        states, mcts_probs, current_players = [], [], []
+        move_count = 0
+        max_moves = 100
+        
+        while True:
+            acts, probs = mcts.get_move_probs(env, temp=temp)
+            
+            canonical_board = env.unwrapped.board.copy() * env.unwrapped.current_player
+            states.append(canonical_board)
+            
+            prob_vec = np.zeros(9)
+            for a, p in zip(acts, probs):
+                prob_vec[a] = p
+            mcts_probs.append(prob_vec)
+            current_players.append(env.unwrapped.current_player)
+            
+            move = np.random.choice(acts, p=probs)
+            mcts.update_with_move(move)
+            
+            obs, reward, terminated, truncated, info = env.step(move)
+            move_count += 1
+            
+            if terminated:
+                actual_winner = -env.unwrapped.current_player
+                winner_z = np.zeros(len(current_players))
+                winner_z[np.array(current_players) == actual_winner] = 1.0
+                winner_z[np.array(current_players) != actual_winner] = -1.0
+                
+                all_play_data.append(list(zip(states, mcts_probs, winner_z)))
+                break # Break from inner while loop to start next game
+                
+            if truncated or move_count >= max_moves:
+                winner_z = np.zeros(len(current_players))
+                all_play_data.append(list(zip(states, mcts_probs, winner_z)))
+                break # Break from inner while loop to start next game
+
+    return all_play_data
 
 class MCTSPlayer:
     def __init__(self, policy_value_fn, c_puct=5, n_playout=400, is_selfplay=0):
@@ -60,17 +144,19 @@ class TrainPipeline:
         self.learn_rate = 2e-3
         self.lr_multiplier = 1.0
         self.temp = 1.0
-        self.n_playout = 400
+        self.n_playout = 50 # Reduced from 400
         self.c_puct = 5
         self.buffer_size = 10000
         self.batch_size = 64 # mini-batch size for training
         self.data_buffer = deque(maxlen=self.buffer_size)
-        self.play_batch_size = 10
+        self.play_batch_size = 10 # Number of games to collect per batch iteration
+        self.num_games_per_worker = 5 # Each worker plays this many games before returning
         self.epochs = 5 # num_train_steps per batch
         self.kl_targ = 0.02
         self.check_freq = 50
         self.game_batch_num = 1500
         self.best_win_ratio = 0.0
+        self.episode_len = 0
         
         # Environment
         self.env = gym.make("TicTacToeBolt-v0")
@@ -214,8 +300,12 @@ class TrainPipeline:
         
         try:
             for i in range(self.game_batch_num):
+                start_time = time.time()
                 self.collect_selfplay_data(self.play_batch_size)
-                print(f"Batch i:{i+1}, Episode Len:{self.episode_len}")
+                end_time = time.time()
+                duration = end_time - start_time
+                games_per_second = self.play_batch_size / duration if duration > 0 else 0
+                print(f"Batch i:{i+1}, Episode Len:{self.episode_len}, Games/s: {games_per_second:.2f}")
                 if len(self.data_buffer) > self.batch_size:
                     # Save current weights before update
                     old_params = copy.deepcopy(self.policy_value_net.state_dict())
@@ -232,88 +322,56 @@ class TrainPipeline:
                         win_ratio = 1.0 * (win_cnt[1] + 0.5*win_cnt[0]) / (sum(win_cnt.values()))
                         print(f"Win Ratio: {win_ratio:.2f}")
                         
-                        if win_ratio >= 0.55: # If improvement
+                        if win_ratio >= 0.55: # If improvement  
                             print("New best policy found! Saving...")
                             self.best_policy_net.load_state_dict(self.policy_value_net.state_dict())
                             torch.save(self.policy_value_net.state_dict(), f'current_policy_{i+1}.pth')
                         else:
-                            print("New policy not better. Reverting.")
-                            self.policy_value_net.load_state_dict(old_params)
-                            
+                            print("New policy not better. NOT Reverting.")
+                            # COMMENT OUT THESE LINES:
+                            # self.policy_value_net.load_state_dict(old_params)
+                            # print("Reverted to old params")   
+                                                     
         except KeyboardInterrupt:
             print('\n\rquit')
 
     def collect_selfplay_data(self, n_games=1):
-        for _ in range(n_games):
-            winner, play_data = self.start_self_play(self.env, temp=self.temp)
-            play_data = list(play_data)[:]
-            self.episode_len = len(play_data)
-            # augment the data
-            play_data = self.get_equi_data(play_data)
-            self.data_buffer.extend(play_data)
-
-    def start_self_play(self, env, temp=1e-3):
-        """ start a self-play game using a MCTS player, reuse the search tree,
-        and store the self-play data: (state, mcts_probs, z) for training
-        """
-        env.reset()
-        
-        # Save model for C++ MCTS
+        # Save model for workers
         model_path = "temp_model.pt"
         script_model = torch.jit.script(self.policy_value_net)
         script_model.save(model_path)
         
-        try:
-            mcts = MCTS_CPP(model_path, self.c_puct, self.n_playout, device=self.device)
-        except Exception as e:
-            print(f"Failed to use C++ MCTS: {e}. Falling back to Python MCTS.")
-            mcts = MCTS(self.policy_value_fn, self.c_puct, self.n_playout)
-            
-        states, mcts_probs, current_players = [], [], []
+        device_str = str(self.device)
         
-        while True:
-            # Get move probabilities
-            acts, probs = mcts.get_move_probs(env, temp=temp)
+        # Determine number of workers
+        # We want to collect n_games in total
+        # Each worker plays self.num_games_per_worker
+        num_workers = (n_games + self.num_games_per_worker - 1) // self.num_games_per_worker
+        max_workers = min(num_workers, os.cpu_count() or 4)
+        
+        self.total_episode_len = 0 # Track total episode length for averaging
+        self.collected_games = 0 # Track collected games
+
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(run_self_play_worker, model_path, self.c_puct, self.n_playout, device_str, self.temp, self.num_games_per_worker)
+                for _ in range(num_workers)
+            ]
             
-            # Store data
-            # Store canonical board: 1 for current player, -1 for opponent
-            canonical_board = env.unwrapped.board.copy() * env.unwrapped.current_player
-            states.append(canonical_board)
-            
-            mcts_probs.append(probs) # This is a list of probabilities for all actions?
-            # get_move_probs returns acts, act_probs. 
-            # We need a full 9-dim vector.
-            prob_vec = np.zeros(9)
-            for a, p in zip(acts, probs):
-                prob_vec[a] = p
-            mcts_probs[-1] = prob_vec
-            current_players.append(env.unwrapped.current_player)
-            
-            # Perform a move
-            move = np.random.choice(acts, p=probs)
-            mcts.update_with_move(move)
-            
-            obs, reward, terminated, truncated, info = env.step(move)
-            
-            if terminated:
-                # Winner is the current player (who just moved)
-                # The values in winner_z should be relative to the player at that step.
-                # If player P1 won, then for all steps where P1 moved, return 1.
-                # For all steps where P2 moved, return -1.
-                actual_winner = -env.unwrapped.current_player # The player who just moved and won
-                winner_z = np.zeros(len(current_players))
-                winner_z[np.array(current_players) == actual_winner] = 1.0
-                winner_z[np.array(current_players) != actual_winner] = -1.0
-                
-                # Reset MCTS
-                mcts.update_with_move(-1) 
-                return actual_winner, zip(states, mcts_probs, winner_z)
-                
-            if truncated: # Should not happen in infinite tic tac toe usually, unless we set a limit
-                # Draw? Or just stop.
-                # Let's assume draw.
-                winner_z = np.zeros(len(current_players))
-                return 0, zip(states, mcts_probs, winner_z)
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    list_of_games = future.result() # Each worker returns a list of games (each game is a list of steps)
+                    for game_steps in list_of_games:
+                        self.total_episode_len += len(game_steps)
+                        self.collected_games += 1
+                        # augment the data
+                        augmented_data = self.get_equi_data(game_steps) 
+                        self.data_buffer.extend(augmented_data)
+                except Exception as e:
+                    print(f"Self-play worker generated an exception: {e}")
+
+        # Update self.episode_len with average for logging
+        self.episode_len = self.total_episode_len / self.collected_games if self.collected_games > 0 else 0
 
     def get_equi_data(self, play_data):
         """augment the data set by rotation and flipping
@@ -373,7 +431,12 @@ class TrainPipeline:
         return loss.item(), entropy.item()
 
 import torch.nn.functional as F
+import multiprocessing
 
 if __name__ == "__main__":
+    try:
+        multiprocessing.set_start_method('spawn')
+    except RuntimeError:
+        pass
     training = TrainPipeline()
     training.run()

@@ -41,7 +41,7 @@ class PolicyValueNet(nn.Module):
         
         # Policy
         policy_logits = self.policy_fc(x)
-        policy = F.softmax(policy_logits, dim=1)
+        policy = F.log_softmax(policy_logits, dim=1)
         
         # Value
         value = F.relu(self.value_fc1(x))
