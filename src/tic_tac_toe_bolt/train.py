@@ -180,7 +180,7 @@ class TrainPipeline:
         self.learn_rate = 2e-3
         self.lr_multiplier = 1.0
         self.temp = 1.0
-        self.n_playout = 50 # Reduced from 400
+        self.n_playout = 100 # Reduced from 400
         self.c_puct = 8
         self.buffer_size = 10000
         self.batch_size = 64 # mini-batch size for training
