@@ -90,7 +90,7 @@ class MCTSPlayer:
             print("WARNING: No sensible moves found!")
             return -1
 
-def run_game(model_path=None, human_starts=True):
+def run_game(model_path=None, human_starts=True, difficulty=20):
     env = gym.make("TicTacToeBolt-v0", render_mode="human")
     env.reset()
     env.render() # Init pygame
@@ -137,9 +137,14 @@ def run_game(model_path=None, human_starts=True):
             
         return zip(legal_positions, act_probs[legal_positions]), value.item()
 
+    # Calculate n_playout based on difficulty
+    # Difficulty 1-20 maps to n_playout 20-400
+    n_playout = difficulty * 20
+    print(f"Difficulty Level: {difficulty} (Simulations: {n_playout})")
+
     # Players
     human = HumanPlayer()
-    ai_player = MCTSPlayer(policy_value_fn, c_puct=5, n_playout=400, use_cpp=True, model_path=model_path_cpp, device=device)
+    ai_player = MCTSPlayer(policy_value_fn, c_puct=5, n_playout=n_playout, use_cpp=True, model_path=model_path_cpp, device=device)
     
     players = {1: human, -1: ai_player}
     if not human_starts:
@@ -194,6 +199,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, help="Path to model .pth file")
     parser.add_argument("--ai_starts", action="store_true", help="If set, AI starts first")
+    parser.add_argument("--difficulty", type=int, default=20, choices=range(1, 21), help="Difficulty level (1-20)")
     args = parser.parse_args()
     
-    run_game(model_path=args.model, human_starts=not args.ai_starts)
+    run_game(model_path=args.model, human_starts=not args.ai_starts, difficulty=args.difficulty)
