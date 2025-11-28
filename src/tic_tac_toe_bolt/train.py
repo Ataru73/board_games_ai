@@ -138,7 +138,7 @@ class MCTSPlayer:
     def reset_player(self):
         self.mcts.update_with_move(-1)
 
-    def get_action(self, env, temp=1e-3, return_prob=0):
+    def get_action(self, env, temp=1e-3, return_prob=0, epsilon=0.0):
         sensible_moves = [i for i in range(9) if env.unwrapped.board[i//3, i%3] == 0]
         # the pi vector returned by MCTS as in the alphaGo Zero paper
         move_probs = np.zeros(9)
@@ -155,7 +155,11 @@ class MCTSPlayer:
                 self.mcts.update_with_move(move)
             else:
                 # with the default temp=1e-3, it is almost equivalent to choosing the move with the highest prob
-                move = np.random.choice(acts, p=probs)
+                if np.random.rand() < epsilon:
+                    # Random move
+                    move = np.random.choice(sensible_moves)
+                else:
+                    move = np.random.choice(acts, p=probs)
                 # reset the root node
                 self.mcts.update_with_move(-1)
 
@@ -168,7 +172,7 @@ class MCTSPlayer:
             return -1
 
 class TrainPipeline:
-    def __init__(self, init_model=None):
+    def __init__(self, init_model=None, asymmetry_epsilon=0.0):
         # Params
         self.board_width = 3
         self.board_height = 3
@@ -189,6 +193,7 @@ class TrainPipeline:
         self.game_batch_num = 1500
         self.best_win_ratio = 0.0
         self.episode_len = 0
+        self.asymmetry_epsilon = asymmetry_epsilon
         
         # Environment
         self.env = gym.make("TicTacToeBolt-v0")
@@ -327,7 +332,17 @@ class TrainPipeline:
             while not done:
                 current_player_idx = self.eval_env.unwrapped.current_player
                 player = players[current_player_idx]
-                action = player.get_action(self.eval_env)
+                
+                # Apply epsilon only if it's the best policy playing (which we want to be imperfect)
+                # In evaluate_policy:
+                # If i % 2 == 0: Current (1), Best (-1). If current_player_idx == -1 (Best), use epsilon.
+                # If i % 2 != 0: Best (1), Current (-1). If current_player_idx == 1 (Best), use epsilon.
+                
+                use_epsilon = 0.0
+                if (i % 2 == 0 and current_player_idx == -1) or (i % 2 != 0 and current_player_idx == 1):
+                     use_epsilon = self.asymmetry_epsilon
+
+                action = player.get_action(self.eval_env, epsilon=use_epsilon)
                 
                 # Update both players with the move (essential for correct MCTS state)
                 current_mcts_player.mcts.update_with_move(action)
@@ -495,11 +510,12 @@ import argparse
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--force_asymmetry", type=float, default=0.0, help="Epsilon for random moves by the opponent during evaluation (e.g. 0.1)")
     args = parser.parse_args()
 
     try:
         multiprocessing.set_start_method('spawn')
     except RuntimeError:
         pass
-    training = TrainPipeline(init_model=args.resume)
+    training = TrainPipeline(init_model=args.resume, asymmetry_epsilon=args.force_asymmetry)
     training.run()

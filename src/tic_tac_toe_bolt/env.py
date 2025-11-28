@@ -5,7 +5,7 @@ import pygame
 import copy
 
 class TicTacToeBoltEnv(gym.Env):
-    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
+    metadata = {"render_modes": ["human", "rgb_array", "ascii"], "render_fps": 4}
 
     def __init__(self, render_mode=None, max_moves=100):
         self.window_size = 512  # The size of the PyGame window
@@ -98,6 +98,8 @@ class TicTacToeBoltEnv(gym.Env):
     def render(self):
         if self.render_mode == "rgb_array":
             return self._render_frame()
+        elif self.render_mode == "ascii":
+            return self._render_ascii()
 
     def _render_frame(self):
         if self.window is None and self.render_mode == "human":
@@ -176,6 +178,20 @@ class TicTacToeBoltEnv(gym.Env):
             return np.transpose(
                 np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2)
             )
+
+    def _render_ascii(self):
+        board_str = ""
+        for r in range(3):
+            row_str = "|"
+            for c in range(3):
+                if self.board[r, c] == 1:
+                    row_str += " X |"
+                elif self.board[r, c] == -1:
+                    row_str += " O |"
+                else:
+                    row_str += " . |"
+            board_str += row_str + "\n"
+        return board_str
 
     def __deepcopy__(self, memo):
         """Custom deepcopy to handle pygame objects that cannot be pickled."""
