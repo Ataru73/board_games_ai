@@ -201,6 +201,34 @@ class CublinoContraEnv(gym.Env):
                 nbs.append((nr, nc))
         return nbs
 
+    def get_legal_actions(self):
+        """
+        Returns a list of legal action indices.
+        Action = (row * 7 + col) * 4 + direction
+        """
+        legal_actions = []
+        for r in range(self.board_size):
+            for c in range(self.board_size):
+                if self.board[r, c, 0] == self.current_player:
+                    # Check all 4 directions
+                    # 0:N, 1:E, 2:S, 3:W
+                    for direction in range(4):
+                        dr, dc = 0, 0
+                        if direction == 0: dr = 1
+                        elif direction == 1: dc = 1
+                        elif direction == 2: dr = -1
+                        elif direction == 3: dc = -1
+                        
+                        target_r, target_c = r + dr, c + dc
+                        
+                        # Check bounds
+                        if 0 <= target_r < self.board_size and 0 <= target_c < self.board_size:
+                            # Check occupancy
+                            if self.board[target_r, target_c, 0] == 0:
+                                action_idx = (r * self.board_size + c) * 4 + direction
+                                legal_actions.append(action_idx)
+        return legal_actions
+
     def render(self):
         if self.render_mode == "ascii":
             print(self._render_ascii())
