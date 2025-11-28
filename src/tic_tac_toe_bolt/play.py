@@ -176,6 +176,7 @@ def run_game(model_path=None, human_starts=True):
 
         obs, reward, terminated, truncated, info = env.step(action)
         env.render()
+        print(env.unwrapped._render_ascii())
         
         if terminated:
             if isinstance(player, HumanPlayer):

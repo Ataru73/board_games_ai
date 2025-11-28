@@ -303,7 +303,7 @@ class TrainPipeline:
             return zip(legal_positions, act_probs[legal_positions]), value.item()
         return policy_value_fn
 
-    def evaluate_policy(self, n_games=10):
+    def evaluate_policy(self, n_games=10, verbose=False):
         """
         Evaluate the trained policy by playing against the best policy
         Note: this is only for monitoring the progress of training
@@ -350,6 +350,10 @@ class TrainPipeline:
                 
                 obs, reward, terminated, truncated, _ = self.eval_env.step(action)
                 
+                if verbose and i == 0:
+                    print(f"Move: {action}")
+                    print(self.eval_env.unwrapped._render_ascii())
+                
                 if terminated:
                     # current_player_idx won
                     if current_player_idx == current_player_key:
@@ -385,7 +389,7 @@ class TrainPipeline:
                     # Evaluate
                     if (i+1) % self.check_freq == 0:
                         print("Evaluating new policy against best policy...")
-                        win_cnt = self.evaluate_policy(n_games=10)
+                        win_cnt = self.evaluate_policy(n_games=10, verbose=True)
                         print(f"Eval Results (Current vs Best): Wins: {win_cnt[1]}, Losses: {win_cnt[-1]}, Draws: {win_cnt[0]}")
                         
                         win_ratio = 1.0 * (win_cnt[1] + 0.5*win_cnt[0]) / (sum(win_cnt.values()))
