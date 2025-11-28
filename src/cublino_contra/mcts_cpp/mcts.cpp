@@ -32,6 +32,8 @@ public:
     std::array<std::array<std::array<int, 3>, 7>, 7> board;
     int current_player;
     int board_size = 7;
+    int step_count = 0;
+    int max_steps = 100;
     std::map<size_t, int> history; // Optimized history using hash
 
     CublinoState() {
@@ -46,6 +48,7 @@ public:
                     board[i][j][k] = 0;
 
         current_player = 1;
+        step_count = 0;
         history.clear();
 
         // Setup P1 (Row 0)
@@ -96,6 +99,7 @@ public:
         new_state.board = board;
         new_state.current_player = current_player;
         new_state.history = history;
+        new_state.step_count = step_count;
         return new_state;
     }
 
@@ -150,6 +154,12 @@ public:
 
         // Switch Turn
         current_player *= -1;
+        
+        // Max Steps Check
+        step_count++;
+        if (step_count >= max_steps) {
+            return {0, true}; // Draw
+        }
         
         // 3-fold Repetition Check
         size_t h = compute_hash();
@@ -321,6 +331,7 @@ public:
                 for (int k = 0; k < 3; ++k)
                     board[i][j][k] = r(i, j, k);
         current_player = player;
+        step_count = 0;
         history.clear();
         record_history();
     }
@@ -333,12 +344,14 @@ public:
     TreeNode* parent;
     std::map<int, std::unique_ptr<TreeNode>> children;
     int n_visits;
-    double Q;
-    double u;
+    double total_value; // Replaces Q, Q = total_value / n_visits
     double P;
+    
+    // Virtual loss constant
+    static constexpr double VIRTUAL_LOSS = 1.0;
 
     TreeNode(TreeNode* parent, double prior_p) 
-        : parent(parent), n_visits(0), Q(0), u(0), P(prior_p) {}
+        : parent(parent), n_visits(0), total_value(0), P(prior_p) {}
 
     void expand(const std::vector<std::pair<int, double>>& action_priors) {
         for (const auto& ap : action_priors) {
@@ -353,30 +366,212 @@ public:
         int best_act = -1;
         TreeNode* best_node = nullptr;
 
+        double sqrt_visits = std::sqrt(n_visits + 1e-8); // Avoid sqrt(0)
+
         for (const auto& item : children) {
-            double u_val = c_puct * item.second->P * std::sqrt(n_visits) / (1 + item.second->n_visits);
-            double val = item.second->Q + u_val;
+            TreeNode* child = item.second.get();
+            double Q = 0;
+            if (child->n_visits > 0) {
+                Q = child->total_value / child->n_visits;
+            }
+            
+            double u_val = c_puct * child->P * sqrt_visits / (1 + child->n_visits);
+            double val = Q + u_val;
+            
             if (val > max_val) {
                 max_val = val;
                 best_act = item.first;
-                best_node = item.second.get();
+                best_node = child;
             }
         }
         return {best_act, best_node};
     }
-
-    void update(double leaf_value) {
+    
+    // Apply virtual loss during selection
+    void apply_virtual_loss() {
         n_visits++;
-        Q += (leaf_value - Q) / n_visits;
+        total_value -= VIRTUAL_LOSS;
+    }
+    
+    // Revert virtual loss and apply real update
+    void update(double leaf_value) {
+        // n_visits was already incremented in select
+        // total_value had VIRTUAL_LOSS subtracted
+        // We want total_value_new = total_value_old + leaf_value
+        // Current total_value = total_value_old - VIRTUAL_LOSS
+        // So:
+        total_value += VIRTUAL_LOSS + leaf_value;
     }
 
     void update_recursive(double leaf_value) {
+        update(leaf_value);
         if (parent) {
             parent->update_recursive(-leaf_value);
         }
-        update(leaf_value);
+    }
+    
+    void update_recursive_no_virtual(double leaf_value) {
+        total_value += leaf_value;
+        if (parent) {
+            parent->update_recursive_no_virtual(-leaf_value);
+        }
     }
 
+    // Recursive virtual loss application (downwards? no, select does one step)
+    // Actually we need to apply virtual loss to the node we picked
+    // And logically this virtual loss propagates? 
+    // Usually virtual loss is local to the node to affect selection. 
+    // But since Q is backed up, does parent Q change?
+    // Standard AlphaZero: Virtual loss is applied to all nodes traversed?
+    // "We apply a virtual loss to all nodes on the simulation path"
+    // Yes.
+    void apply_virtual_loss_recursive() {
+        apply_virtual_loss();
+        // Don't recurse up, we handle path iteratively in MCTS
+    }
+    
+    // Revert virtual loss recursively
+    // This is handled by update_recursive calling update which adds back VIRTUAL_LOSS
+    // Wait, update_recursive calls update. Update adds VIRTUAL_LOSS.
+    // parent->update_recursive(-leaf).
+    // The leaf_value sign flips.
+    // Virtual loss is always "bad", so -1.
+    // If we simply apply -1 everywhere on the way down.
+    // Then on way up, we add +1 + real_value.
+    // But value flips sign at each level.
+    // If I am P1, child is P2.
+    // I pick child. I want to discourage picking child again.
+    // Child Q should decrease.
+    // Child perspective: P2. Lower Q is bad for P2?
+    // Q is value for the player at that node.
+    // If P2 node Q decreases, it means P2 is losing.
+    // Parent (P1) chooses child with max value.
+    // If P2 Q decreases (becomes more negative), does P1 pick it less?
+    // No, P1 picks child maximizing Q_child?
+    // No, usually in AlphaZero:
+    // Q(s,a) is value of taking action a from s.
+    // This Q is stored in the edge (or child node).
+    // This value is from perspective of player at s.
+    // So child node stores value for player at s (parent).
+    // In my implementation: Q is from perspective of player at `node`.
+    // My select flips perspective implicitly?
+    // `parent->update_recursive(-leaf_value)`.
+    // Yes. Leaf value is for leaf player. Parent gets -leaf.
+    // So `node->total_value` is from `node` player perspective.
+    // `parent` selects child maximizing... what?
+    // `select`: `Q + u`. `Q = child->total_value / N`.
+    // If `child` stores value for `child` player (who is opponent of `parent`),
+    // then `parent` should minimize `child->Q`?
+    // Or `child` stores value for `parent`?
+    // Standard MCTS: Edge stores Q for current player.
+    // My implementation: `node->update_recursive(-leaf_value)`.
+    // If leaf is win for leaf-player (1.0). Parent gets -1.0.
+    // So parent (loser) stores -1.0.
+    // Parent's parent (winner) gets +1.0.
+    // So `node->total_value` is indeed from perspective of player at `node`.
+    // `select` maximizes `child->total_value`.
+    // If `parent` (P1) picks child (P2), `child` stores value for P2.
+    // P1 wants to move to a state where P2 loses (value -1).
+    // So P1 should MINIMIZE child Q?
+    // Existing code: `if (val > max_val)`. Maximizes.
+    // This implies `child` stores value for `parent`?
+    // Let's check `update_recursive`.
+    // `update(leaf_value)`.
+    // `if (parent) parent->update_recursive(-leaf_value)`.
+    // Leaf (P_L). Value v.
+    // Parent (P_L-1). Value -v.
+    // If `child` stores value for P_L, and `parent` maximizes `child->Q`.
+    // Parent P_L-1 wants to WIN. So -v should be high.
+    // So v (child value) should be low.
+    // So parent should MINIMIZE child value.
+    // BUT `select` MAXIMIZES.
+    // This implies my MCTS implementation is relying on `child` storing value for `parent`.
+    // Let's trace `update_recursive` from leaf.
+    // Leaf (state S_L). `update(v)`. Stores v.
+    // Leaf is child of Parent node (state S_L-1).
+    // Parent calls `select`. Iterates children.
+    // Maximizes `child->Q`.
+    // If `child` stores `v` (value for S_L player), and `parent` maximizes it...
+    // That means `parent` assumes `v` is good for `parent`.
+    // But `v` is good for S_L (opponent).
+    // This is a contradiction unless `child` stores value for `parent`.
+    // In `update_recursive`: `update(leaf_value)`. This updates `node` (child) with `v`.
+    // `parent->update_recursive(-v)`. This updates `parent` with `-v`.
+    // So `child` definitely stores `v` (for S_L).
+    // So `parent` maximizing `child->Q` is maximizing value for OPPONENT.
+    // This means `select` logic is WRONG or `update` logic is WRONG in original code.
+    // UNLESS...
+    // Maybe `child` in `children` map represents "Action to take".
+    // And `child` node stores statistics for that edge.
+    // The value Q(s,a) is usually stored in the edge.
+    // In my code, `child` node IS the edge container.
+    // Q(s,a) should be value for player at `s`.
+    // My `child` stores `v` (value for player at `child`).
+    // So `child->Q` is value for player at `child` (opponent).
+    // Parent maximizes it? That implies parent wants opponent to win.
+    // ERROR in original logic??
+    
+    // Let's assume standard AlphaZero logic:
+    // We select edge (s,a) maximizing Q(s,a) + U(s,a).
+    // Q(s,a) is value for player `s`.
+    // When we backup from leaf `s_L` with value `v` (for player `s_L`):
+    // The parent of `s_L` is `s_L-1`.
+    // `s_L-1` made move to get to `s_L`.
+    // So edge (`s_L-1`, `a`) leads to `s_L`.
+    // We want to update Q(`s_L-1`, `a`) with value for `s_L-1`.
+    // Value for `s_L-1` is `-v`.
+    // So we should update `child` (representing edge/node `s_L`) with `-v`.
+    // My code: `update(leaf_value)` -> `child` gets `v`.
+    // This confirms `child` stores value for `child` player.
+    // So `select` logic maximizing `child->Q` is WRONG.
+    // It should minimize? Or `update` should flip sign?
+    
+    // CORRECTION:
+    // To support standard maximization in select, `child` must store value for `parent`.
+    // So when backing up:
+    // `leaf_value` (for leaf player).
+    // `node` (leaf). `update(leaf_value)`. Stores value for leaf player.
+    // `parent` needs value for parent player: `-leaf_value`.
+    // But `parent` selects `node`.
+    // It looks at `node->Q`.
+    // `node->Q` must be value for `parent`.
+    // So `node->update` should receive `-leaf_value`??
+    // Let's look at `playout` in original code:
+    // `node->update_recursive(-leaf_value);`
+    // It calls `node->update(-leaf_value)`.
+    // So `node` (leaf) stores `-leaf_value`.
+    // `-leaf_value` is value for PARENT of leaf.
+    // So `node` stores value for its PARENT.
+    // `select` maximizes `node->Q`. Parent maximizes value for Parent.
+    // THIS IS CORRECT.
+    // My analysis of `update_recursive` was slightly off.
+    // `node->update_recursive(v)`:
+    // `update(v)`. Node gets v.
+    // `parent->update_recursive(-v)`. Parent gets -v.
+    
+    // So in `playout`:
+    // Leaf state S_L. Value `v` (for S_L player).
+    // We call `node->update_recursive(-v)`.
+    // `node` gets `-v` (Value for S_L-1, i.e., Parent).
+    // `parent` gets `-(-v) = v` (Value for S_L-2, i.e. S_L player).
+    // This "flip every level" works if `node` stores value for `node->parent`.
+    // Yes, Q(s,a) is stored in the node corresponding to `a`.
+    // Q(s,a) is value for `s`.
+    // `node` represents `(s,a)`. `node->parent` is `s`.
+    // So `node` must store value for `parent`.
+    // OK, logic holds.
+    
+    // Virtual Loss Logic with this understanding:
+    // `select` picks `child`.
+    // `child` stores value for `parent`.
+    // We want to discourage `parent` from picking `child` again.
+    // So `child->Q` should DECREASE.
+    // So `child->total_value -= VIRTUAL_LOSS` is correct.
+    // Backup: `child->total_value += VIRTUAL_LOSS + real_value`.
+    // `real_value` passed to `child` is `-leaf_value` (value for parent).
+    // So `child->total_value` eventually converges to N * (-leaf_value).
+    // Correct.
+    
     bool is_leaf() const {
         return children.empty();
     }
@@ -388,10 +583,11 @@ class MCTS {
     double c_puct;
     int n_playout;
     torch::Device device;
+    int batch_size;
 
 public:
     MCTS(std::string model_path, double c_puct, int n_playout, std::string device_str) 
-        : c_puct(c_puct), n_playout(n_playout), device(device_str) {
+        : c_puct(c_puct), n_playout(n_playout), device(device_str), batch_size(16) { // Default batch 16
         try {
             module = torch::jit::load(model_path, device);
             module.eval();
@@ -402,77 +598,221 @@ public:
         root = std::make_unique<TreeNode>(nullptr, 1.0);
     }
 
-    void playout(CublinoState& state) {
-        TreeNode* node = root.get();
-        // Use loop to advance state to avoid recursive copy if possible, 
-        // but here we copy once and mutate.
-        CublinoState current_state = state.copy();
+    void process_batch(int current_batch_size, CublinoState& root_state) {
+        // 1. Selection Phase
+        std::vector<TreeNode*> leaves;
+        std::vector<CublinoState> leaf_states;
+        std::vector<std::vector<TreeNode*>> paths;
+        std::vector<bool> is_terminal;
+        std::vector<int> terminal_rewards;
+        
+        leaves.reserve(current_batch_size);
+        leaf_states.reserve(current_batch_size);
+        paths.reserve(current_batch_size);
+        is_terminal.reserve(current_batch_size);
+        terminal_rewards.reserve(current_batch_size);
+        
+        for(int b=0; b<current_batch_size; ++b) {
+            TreeNode* node = root.get();
+            CublinoState state = root_state.copy();
+            std::vector<TreeNode*> path;
+            path.push_back(node);
+            
+            bool term = false;
+            int reward = 0;
 
-        while (!node->is_leaf()) {
-            auto selection = node->select(c_puct);
-            int action = selection.first;
-            node = selection.second;
+            while (!node->is_leaf()) {
+                auto selection = node->select(c_puct);
+                int action = selection.first;
+                node = selection.second;
+                path.push_back(node);
+                
+                // Apply virtual loss immediately to affect next selection in this batch
+                node->apply_virtual_loss();
+
+                auto step_res = state.step(action);
+                term = step_res.second;
+                reward = step_res.first;
+                
+                if (term) break;
+            }
             
-            // Optimized step call: returns {reward, terminated}
-            std::pair<int, bool> step_res = current_state.step(action);
-            bool terminated = step_res.second;
-            
-            if (terminated) {
-                int reward = step_res.first;
-                if (reward == 0) {
-                     node->update_recursive(0.0);
-                } else {
-                     node->update_recursive(-1.0);
-                }
-                return;
+            leaves.push_back(node);
+            leaf_states.push_back(std::move(state));
+            paths.push_back(std::move(path));
+            is_terminal.push_back(term);
+            terminal_rewards.push_back(reward);
+        }
+
+        // 2. Inference Phase
+        std::vector<torch::Tensor> obs_list;
+        std::vector<int> valid_indices;
+        obs_list.reserve(current_batch_size);
+        valid_indices.reserve(current_batch_size);
+
+        for(int i=0; i<current_batch_size; ++i) {
+            if (!is_terminal[i]) {
+                obs_list.push_back(leaf_states[i].get_obs());
+                valid_indices.push_back(i);
             }
         }
 
-        // Evaluation
-        torch::Tensor obs = current_state.get_obs();
-        obs = obs.to(device);
-        std::vector<torch::jit::IValue> inputs;
-        inputs.push_back(obs);
-        
-        auto output = module.forward(inputs).toTuple();
-        
-        // Tensor access optimization? CPU transfer is the bottleneck usually.
-        torch::Tensor policy_logits = output->elements()[0].toTensor().cpu();
-        torch::Tensor value = output->elements()[1].toTensor().cpu();
-        
-        torch::Tensor policy_probs = torch::softmax(policy_logits, 1).squeeze(0);
-        double leaf_value = value.item<double>();
+        torch::Tensor policy_probs_batch;
+        torch::Tensor values_batch;
 
-        std::vector<int> legal_moves = current_state.get_legal_actions();
-        std::vector<std::pair<int, double>> action_priors;
-        action_priors.reserve(legal_moves.size());
-        
-        double sum_probs = 0;
-        // Direct data access to avoid item<double>() overhead loop? 
-        // float* probs_ptr = policy_probs.data_ptr<float>(); 
-        // Assuming float model.
-        for (int move : legal_moves) {
-            double prob = policy_probs[move].item<double>();
-            action_priors.push_back({move, prob});
-            sum_probs += prob;
-        }
-        
-        if (sum_probs > 0) {
-            for (auto& ap : action_priors) ap.second /= sum_probs;
-        } else {
-            for (auto& ap : action_priors) ap.second = 1.0 / legal_moves.size();
+        if (!obs_list.empty()) {
+            torch::Tensor batch_obs = torch::stack(obs_list).to(device).squeeze(1); // (B, 3, 7, 7)
+            std::vector<torch::jit::IValue> inputs;
+            inputs.push_back(batch_obs);
+
+            auto output = module.forward(inputs).toTuple();
+            // Move to CPU once
+            policy_probs_batch = torch::softmax(output->elements()[0].toTensor(), 1).cpu(); // (B, 196)
+            values_batch = output->elements()[1].toTensor().cpu(); // (B, 1)
         }
 
-        node->expand(action_priors);
-        node->update_recursive(-leaf_value);
+        // 3. Backup Phase
+        for(int i=0; i<current_batch_size; ++i) {
+            TreeNode* leaf = leaves[i];
+            double value = 0;
+
+            if (is_terminal[i]) {
+                if (terminal_rewards[i] == 0) {
+                     value = 0.0;
+                } else {
+                     // Winner is player who moved to reach this state.
+                     // Leaf stores value for PARENT (who moved).
+                     // So we want +1.0 for Parent.
+                     // We pass value `v` to `update_recursive`.
+                     // `node->update(v)`. `parent->update_recursive(-v)`.
+                     // So if we want Parent to have +1, we pass -1 to Parent.
+                     // So `node->update` gets +1?
+                     // Wait. 
+                     // My logic: `update_recursive(-leaf_value)`.
+                     // If I pass `-1.0` to `update_recursive`:
+                     // `node` gets -1. `parent` gets +1.
+                     // This is what we want for "Parent won".
+                     // So value = -1.0.
+                     value = -1.0;
+                }
+            } else {
+                // Find index in batch
+                int batch_idx = -1;
+                for(int k=0; k<valid_indices.size(); ++k) if(valid_indices[k]==i) batch_idx=k;
+                
+                torch::Tensor probs = policy_probs_batch[batch_idx];
+                value = values_batch[batch_idx].item<double>(); // Value for current player at leaf
+
+                // Expand
+                std::vector<int> legal_moves = leaf_states[i].get_legal_actions();
+                std::vector<std::pair<int, double>> action_priors;
+                action_priors.reserve(legal_moves.size());
+                
+                double sum_probs = 0;
+                for (int move : legal_moves) {
+                    double prob = probs[move].item<double>();
+                    action_priors.push_back({move, prob});
+                    sum_probs += prob;
+                }
+                
+                if (sum_probs > 0) {
+                    for (auto& ap : action_priors) ap.second /= sum_probs;
+                } else {
+                    for (auto& ap : action_priors) ap.second = 1.0 / legal_moves.size();
+                }
+                leaf->expand(action_priors);
+                
+                // Value from Net is for player at Leaf.
+                // We want to pass value to update logic.
+                // `playout` did `node->update_recursive(-leaf_value)`.
+                // So if net says 0.8 (good for Leaf), we pass -0.8.
+                // Node (Leaf) gets -0.8 (bad for Parent).
+                // Parent gets 0.8. Correct.
+                value = -value;
+            }
+
+            // Backup along path
+            // We need to revert virtual loss on the path nodes.
+            // AND update with real value.
+            // My TreeNode::update adds VIRTUAL_LOSS + leaf_value.
+            // So we just call update_recursive(value) on leaf?
+            // Yes, but we need to call it on the leaf node.
+            // `update_recursive` traverses up to root.
+            // But wait, we applied virtual loss to ALL nodes on path?
+            // In selection loop: `node->apply_virtual_loss()` for each selected node.
+            // Path includes root? 
+            // Loop: `node` starts at root. `select` returns child.
+            // `node` becomes child. `path.push_back(node)`.
+            // `node->apply_virtual_loss()`.
+            // So we applied to child, grandchild, ... leaf.
+            // Root virtual loss? 
+            // Standard: Root visit count increases.
+            // My loop applied to all SELECTED nodes.
+            // So root didn't get virtual loss (it wasn't selected, it was start).
+            // But root N should increase.
+            // In `get_move_probs`, root N is sum of children N.
+            // `update_recursive` goes up to parent.
+            // Does it stop at root? `if (parent)`. Root has no parent.
+            // `update(leaf_value)`.
+            // So calling `leaf->update_recursive(value)` will traverse up and fix everyone.
+            // Including root.
+            // BUT, `root` did NOT have `apply_virtual_loss` called on it in my loop!
+            // `path` contains `node` after select.
+            // Correct.
+            // So `leaf->update_recursive` will add `VIRTUAL_LOSS` to root... but root never subtracted it!
+            // ERROR.
+            // `update` assumes `VIRTUAL_LOSS` was subtracted.
+            // So we must ensure `apply_virtual_loss` logic matches `update` logic.
+            // My `update_recursive` goes all the way to root.
+            // So `root` will get `+ VIRTUAL_LOSS`.
+            // So `root` must have had `apply_virtual_loss`.
+            // Solution: Apply virtual loss to root at start of traversal?
+            // Or fix `update` to not add VIRTUAL_LOSS if node is root?
+            // Simpler: Apply VL to root.
+            // In loop: `TreeNode* node = root.get(); node->apply_virtual_loss();`
+            
+            // Wait, path vector: `path.push_back(node)` (root).
+            // `select` -> child. `path.push_back(child)`. `child->apply_vl()`.
+            // So I need to apply to root too.
+            // Actually, simpler:
+            // Iterate `path` (which includes root and all selected nodes).
+            // For each node in path:
+            // `node->revert_virtual_loss()`.
+            // Then `leaf->update_recursive_standard(value)`.
+            // This decouples VL revert from value backup.
+            // Let's modify TreeNode to allow this clean separation.
+            
+            // Refactored TreeNode logic for batching:
+            // 1. apply_virtual_loss(): N++, W -= 1.0.
+            // 2. revert_virtual_loss(): W += 1.0. (N stays ++).
+            // 3. update_standard(val): W += val. (N stays).
+            
+            // Loop path: revert_virtual_loss().
+            // Then leaf->update_recursive_standard(value). (With sign flipping).
+            
+            for (TreeNode* n : paths[i]) {
+                n->total_value += TreeNode::VIRTUAL_LOSS;
+            }
+            
+            // Now do standard backup
+            // `value` is already adjusted to be passed to update_recursive (e.g. -leaf_value).
+            leaf->update_recursive_no_virtual(value);
+        }
     }
 
     std::pair<std::vector<int>, std::vector<double>> get_move_probs(const CublinoState& state, double temp) {
-        for (int i = 0; i < n_playout; ++i) {
-            CublinoState state_copy = state.copy();
-            playout(state_copy);
+        int remaining = n_playout;
+        while (remaining > 0) {
+            int current_batch = std::min(batch_size, remaining);
+            // Must cast const away or copy? `process_batch` takes `CublinoState&` (root state).
+            // It needs to copy it for traversals.
+            // `state` is const ref. Make a copy.
+            CublinoState root_state = state.copy();
+            process_batch(current_batch, root_state);
+            remaining -= current_batch;
         }
 
+        // ... return logic ...
         std::vector<int> acts;
         std::vector<double> probs;
         std::vector<int> visits;
@@ -516,6 +856,13 @@ public:
         }
     }
 };
+
+// ... TreeNode extra methods needed ...
+// In TreeNode:
+// void update_recursive_no_virtual(double leaf_value) {
+//     total_value += leaf_value;
+//     if (parent) parent->update_recursive_no_virtual(-leaf_value);
+// }
 
 PYBIND11_MODULE(_mcts_cpp, m) {
     py::class_<CublinoState>(m, "CublinoState")

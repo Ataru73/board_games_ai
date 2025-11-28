@@ -31,6 +31,8 @@ class CublinoContraEnv(gym.Env):
             4: np.array([-1, 0, 0])  # West
         }
         self._vec_to_val = {tuple(v): k for k, v in self._val_to_vec.items()}
+        
+        self.max_steps = 100
 
         self.reset()
 
@@ -38,6 +40,7 @@ class CublinoContraEnv(gym.Env):
         super().reset(seed=seed)
         self.board = np.zeros((self.board_size, self.board_size, 3), dtype=np.int8)
         self.current_player = 1 # P1 starts
+        self.steps = 0
 
         # Setup P1 (Row 0)
         # Top=6, South=3
@@ -119,6 +122,10 @@ class CublinoContraEnv(gym.Env):
 
         # Switch Turn
         self.current_player *= -1
+        
+        self.steps += 1
+        if self.steps >= self.max_steps:
+             return self._get_obs(), 0, False, True, {"winner": 0, "reason": "Max steps reached"}
         
         # Check 3-fold repetition
         state_key = self._get_state_key()
