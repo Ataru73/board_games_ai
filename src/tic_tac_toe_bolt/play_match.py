@@ -64,7 +64,7 @@ def get_policy_value_fn(policy_value_net):
 def load_model(model_path):
     if model_path and os.path.exists(model_path):
         policy_value_net = PolicyValueNet()
-        policy_value_net.load_state_dict(torch.load(model_path))
+        policy_value_net.load_state_dict(torch.load(model_path, weights_only=False))
         print(f"Loaded model from {model_path}")
         return policy_value_net
     elif model_path:

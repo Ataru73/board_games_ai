@@ -6,3 +6,4 @@ build/*
 pyproject.toml
 *.so
 *.pt
+src/cublino_contra/__pycache__/*

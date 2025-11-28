@@ -1,0 +1,226 @@
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+
+class CublinoContraEnv(gym.Env):
+    metadata = {"render_modes": ["ascii", "ansi"]}
+
+    def __init__(self, render_mode=None):
+        self.render_mode = render_mode
+        self.board_size = 7
+        
+        # Observation Space: 7x7 grid with 3 channels
+        # Channel 0: Player (0: Empty, 1: P1, -1: P2)
+        # Channel 1: Top Value (0: Empty, 1-6)
+        # Channel 2: South Value (0: Empty, 1-6)
+        self.observation_space = spaces.Box(
+            low=-1, high=6, shape=(self.board_size, self.board_size, 3), dtype=np.int8
+        )
+
+        # Action Space: Select a square (row, col) and a direction (0:N, 1:E, 2:S, 3:W)
+        # Total actions: 7 * 7 * 4 = 196
+        self.action_space = spaces.Discrete(self.board_size * self.board_size * 4)
+
+        # Vector mapping for dice orientation logic
+        self._val_to_vec = {
+            1: np.array([0, 0, 1]),
+            6: np.array([0, 0, -1]),
+            2: np.array([0, -1, 0]), # South
+            5: np.array([0, 1, 0]),  # North
+            3: np.array([1, 0, 0]),  # East
+            4: np.array([-1, 0, 0])  # West
+        }
+        self._vec_to_val = {tuple(v): k for k, v in self._val_to_vec.items()}
+
+        self.reset()
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        self.board = np.zeros((self.board_size, self.board_size, 3), dtype=np.int8)
+        self.current_player = 1 # P1 starts
+
+        # Setup P1 (Row 0)
+        # Top=6, South=3
+        for col in range(self.board_size):
+            self.board[0, col] = [1, 6, 3]
+
+        # Setup P2 (Row 6)
+        # Top=6, South=4 (Since North is 3 relative to P2, so South is 7-3=4)
+        # Wait, rules say: "dice are oriented with the '6' face up and the '3' face pointing towards the player."
+        # P2 is at Row 6 (Top of board). "Towards P2" is North (Up).
+        # So P2's dice have 3 facing North.
+        # So South face is 7-3 = 4.
+        for col in range(self.board_size):
+            self.board[6, col] = [-1, 6, 4]
+
+        return self._get_obs(), {}
+
+    def _get_obs(self):
+        return self.board.copy()
+
+    def step(self, action):
+        # Decode action
+        direction = action % 4
+        square_idx = action // 4
+        row = square_idx // self.board_size
+        col = square_idx % self.board_size
+
+        # Directions: 0:N, 1:E, 2:S, 3:W
+        dr, dc = 0, 0
+        if direction == 0: dr = 1  # North (Row + 1)
+        elif direction == 1: dc = 1 # East (Col + 1)
+        elif direction == 2: dr = -1 # South (Row - 1)
+        elif direction == 3: dc = -1 # West (Col - 1)
+
+        # Validate Move
+        if not (0 <= row < self.board_size and 0 <= col < self.board_size):
+            return self._get_obs(), -10, True, False, {"error": "Invalid source coordinates"}
+        
+        die = self.board[row, col]
+        player, top, south = die
+
+        if player != self.current_player:
+             # Invalid: Not your die or empty
+             return self._get_obs(), -10, True, False, {"error": "Not your die"}
+
+        target_row, target_col = row + dr, col + dc
+
+        if not (0 <= target_row < self.board_size and 0 <= target_col < self.board_size):
+             # Invalid: Out of bounds
+             return self._get_obs(), -10, True, False, {"error": "Out of bounds"}
+
+        if self.board[target_row, target_col, 0] != 0:
+             # Invalid: Target occupied
+             return self._get_obs(), -10, True, False, {"error": "Target occupied"}
+
+        # Perform Move
+        new_top, new_south = self._rotate_die(top, south, direction)
+        
+        # Update Board
+        self.board[row, col] = [0, 0, 0]
+        self.board[target_row, target_col] = [self.current_player, new_top, new_south]
+
+        # Check Win Condition (Reached opponent's back row)
+        # P1 target: Row 6
+        # P2 target: Row 0
+        if self.current_player == 1 and target_row == 6:
+            return self._get_obs(), 1, True, False, {"winner": 1}
+        if self.current_player == -1 and target_row == 0:
+            return self._get_obs(), 1, True, False, {"winner": -1}
+
+        # Resolve Battles
+        self._resolve_battles(target_row, target_col)
+
+        # Switch Turn
+        self.current_player *= -1
+
+        return self._get_obs(), 0, False, False, {}
+
+    def _rotate_die(self, top, south, direction):
+        # 0:N, 1:E, 2:S, 3:W
+        # Map to vectors
+        v_top = self._val_to_vec[top]
+        v_south = self._val_to_vec[south]
+        v_east = np.cross(v_top, v_south)
+        
+        # Values
+        val_top = top
+        val_south = south
+        val_north = 7 - south
+        val_bottom = 7 - top
+        val_east = self._vec_to_val[tuple(v_east)]
+        val_west = 7 - val_east
+
+        if direction == 0: # North
+            # New Top = Old South
+            # New South = Old Bottom
+            return val_south, val_bottom
+        elif direction == 2: # South
+            # New Top = Old North
+            # New South = Old Top
+            return val_north, val_top
+        elif direction == 1: # East
+            # New Top = Old West
+            # New South = Old South (unchanged)
+            return val_west, val_south
+        elif direction == 3: # West
+            # New Top = Old East
+            # New South = Old South (unchanged)
+            return val_east, val_south
+        return top, south
+
+    def _resolve_battles(self, moved_r, moved_c):
+        # Check neighbors of the moved die for opponent dice
+        # If an opponent die is found, check if it is now "contested" (surrounded by >= 2 current_player dice)
+        
+        opponent = -self.current_player
+        neighbors = self._get_neighbors(moved_r, moved_c)
+        
+        # We need to handle simultaneous battles.
+        # Identify all contested opponent dice first.
+        contested_dice = []
+        
+        for r, c in neighbors:
+            if self.board[r, c, 0] == opponent:
+                # Check if this opponent die is surrounded by >= 2 of current_player
+                opp_neighbors = self._get_neighbors(r, c)
+                friendly_count = sum(1 for nr, nc in opp_neighbors if self.board[nr, nc, 0] == self.current_player)
+                
+                if friendly_count >= 2:
+                    contested_dice.append((r, c))
+        
+        # Resolve each battle
+        dice_to_remove = []
+        for r, c in contested_dice:
+            # r, c is the Defender (Opponent)
+            # Attacker is self.current_player
+            
+            # Defender Total = Defender Die Value + Sum(Defender's Friendly Neighbors)
+            defender_die_val = self.board[r, c, 1]
+            defender_neighbors = self._get_neighbors(r, c)
+            defender_friendly_sum = sum(self.board[nr, nc, 1] for nr, nc in defender_neighbors if self.board[nr, nc, 0] == opponent)
+            defender_total = defender_die_val + defender_friendly_sum
+            
+            # Attacker Total = Sum(Attacker's Neighbors around Defender)
+            attacker_sum = sum(self.board[nr, nc, 1] for nr, nc in defender_neighbors if self.board[nr, nc, 0] == self.current_player)
+            
+            # Rule: If Defender Total < Attacker Total, Defender dies.
+            if defender_total < attacker_sum:
+                dice_to_remove.append((r, c))
+                
+        # Remove dice
+        for r, c in dice_to_remove:
+            self.board[r, c] = [0, 0, 0]
+
+    def _get_neighbors(self, r, c):
+        # Orthogonal neighbors
+        nbs = []
+        for dr, dc in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < self.board_size and 0 <= nc < self.board_size:
+                nbs.append((nr, nc))
+        return nbs
+
+    def render(self):
+        if self.render_mode == "ascii":
+            print(self._render_ascii())
+    
+    def _render_ascii(self):
+        # Render board
+        # P1: Positive numbers, P2: Negative numbers? Or just Colors.
+        # Let's use format: P V (Player, Value)
+        lines = []
+        lines.append("  " + " ".join([f" {c}  " for c in range(self.board_size)]))
+        for r in range(self.board_size - 1, -1, -1):
+            row_str = f"{r} "
+            for c in range(self.board_size):
+                p, v, s = self.board[r, c]
+                if p == 0:
+                    row_str += " ..  "
+                elif p == 1:
+                    row_str += f" +{v}  "
+                else:
+                    row_str += f" -{v}  "
+            lines.append(row_str)
+        return "\n".join(lines)
+
