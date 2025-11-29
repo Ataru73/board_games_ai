@@ -2,6 +2,7 @@ import gymnasium as gym
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.optim import lr_scheduler
 import numpy as np
 import random
 from collections import deque
@@ -74,7 +75,7 @@ def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_ga
                 state_tensor = np.transpose(board, (2, 0, 1)) # (3, 7, 7)
                 states.append(state_tensor)
                 
-                acts, probs = mcts.get_move_probs(env, temp=temp)
+                acts, probs = mcts.get_move_probs(env, temp=temp if len(states) < 30 else 1e-3)
                 
                 prob_vec = np.zeros(196) # 7*7*4
                 for a, p in zip(acts, probs):
@@ -155,7 +156,7 @@ class TrainPipeline:
         self.n_playout = 400
         self.c_puct = 5
         self.buffer_size = 10000
-        self.batch_size = 64
+        self.batch_size = 256
         self.data_buffer = deque(maxlen=self.buffer_size)
         self.play_batch_size = 20 # Increased from 10
         self.num_games_per_worker = 5 # Increased from 1
@@ -172,11 +173,14 @@ class TrainPipeline:
 
         self.policy_value_net = PolicyValueNet(board_size=self.board_size).to(self.device)
         self.optimizer = optim.Adam(self.policy_value_net.parameters(), weight_decay=1e-4)
+        self.scheduler = lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.game_batch_num, eta_min=1e-5)
 
         if init_model:
             checkpoint = torch.load(init_model, map_location=self.device)
-            self.policy_value_net.load_state_dict(checkpoint)
-            print(f"Loaded model from {init_model}")
+            self.policy_value_net.load_state_dict(checkpoint['policy_value_net'])
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+            self.scheduler.load_state_dict(checkpoint['scheduler'])
+            print(f"Loaded model, optimizer, and scheduler from {init_model}")
 
         # Persistent ProcessPoolExecutor
         self.max_workers = min((self.play_batch_size + self.num_games_per_worker - 1) // self.num_games_per_worker, os.cpu_count() or 4)
@@ -260,6 +264,7 @@ class TrainPipeline:
                 
                 if len(self.data_buffer) > self.batch_size:
                     loss, entropy = self.policy_update()
+                    self.scheduler.step()
                     print(f"Loss: {loss:.4f}, Entropy: {entropy:.4f}")
                     
                     if (i+1) % self.check_freq == 0:
@@ -273,13 +278,21 @@ class TrainPipeline:
                         if win_ratio >= 0.55:
                             print("New best policy!")
                             self.best_policy_net.load_state_dict(self.policy_value_net.state_dict())
-                            torch.save(self.policy_value_net.state_dict(), f'current_policy_cublino_{i+1}.pth')
+                            torch.save({
+                                'policy_value_net': self.policy_value_net.state_dict(),
+                                'optimizer': self.optimizer.state_dict(),
+                                'scheduler': self.scheduler.state_dict(),
+                            }, f'current_policy_cublino_{i+1}.pth')
                         else:
                             print("Not better.")
                             
         except KeyboardInterrupt:
             print("Saving checkpoint...")
-            torch.save(self.policy_value_net.state_dict(), 'checkpoint_cublino.pth')
+            torch.save({
+                'policy_value_net': self.policy_value_net.state_dict(),
+                'optimizer': self.optimizer.state_dict(),
+                'scheduler': self.scheduler.state_dict(),
+            }, 'checkpoint_cublino.pth')
         finally:
             print("Shutting down executor...")
             self.executor.shutdown()

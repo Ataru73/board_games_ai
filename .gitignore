@@ -9,3 +9,4 @@ pyproject.toml
 src/cublino_contra/__pycache__/*
 src/tic_tac_toe_bolt_cpp.egg-info/*
 GEMINI.md
+tests/__pycache__/*

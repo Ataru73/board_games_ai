@@ -32,7 +32,7 @@ class CublinoContraEnv(gym.Env):
         }
         self._vec_to_val = {tuple(v): k for k, v in self._val_to_vec.items()}
         
-        self.max_steps = 100
+        self.max_steps = 200
 
         self.reset()
 
