@@ -241,7 +241,11 @@ class TrainPipeline:
             for i in range(self.game_batch_num):
                 start_time = time.time()
                 self.collect_selfplay_data(self.play_batch_size)
-                print(f"Batch i:{i+1}, Episode Len:{self.episode_len:.2f}, Time:{time.time()-start_time:.2f}s, P1 Wins:{self.batch_game_stats[1]}, P2 Wins:{self.batch_game_stats[-1]}, Draws:{self.batch_game_stats[0]}")
+                batch_time = time.time() - start_time
+                workers_used = (self.play_batch_size + self.num_games_per_worker - 1) // self.num_games_per_worker
+                active_workers = min(workers_used, self.max_workers)
+                avg_game_time = (batch_time * active_workers) / self.collected_games if self.collected_games > 0 else 0.0
+                print(f"Batch i:{i+1}, Episode Len:{self.episode_len:.2f}, Time:{batch_time:.2f}s, AvgGameTime:{avg_game_time:.2f}s, P1 Wins:{self.batch_game_stats[1]}, P2 Wins:{self.batch_game_stats[-1]}, Draws:{self.batch_game_stats[0]}")
                 
                 if len(self.data_buffer) > self.batch_size:
                     loss, entropy = self.policy_update()
