@@ -249,7 +249,7 @@ class TrainPipeline:
                         print(f"Best Policy Wins: {win_cnt[-1]}")
                         print(f"Draws: {win_cnt[0]}")
                         
-                        win_ratio = 1.0 * (win_cnt[1] + 0.5*win_cnt[0]) / (sum(win_cnt.values()))
+                        win_ratio = 1.0 * win_cnt[1] / (sum(win_cnt.values()))
                         if win_ratio >= 0.55:
                             print("New best policy!")
                             self.best_policy_net.load_state_dict(self.policy_value_net.state_dict())
