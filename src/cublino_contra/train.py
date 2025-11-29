@@ -99,6 +99,8 @@ def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_ga
                     if winner_val != 0:
                         winner_z[np.array(current_players) == winner_val] = 1.0
                         winner_z[np.array(current_players) != winner_val] = -1.0
+                    else: # Draw
+                        winner_z[:] = -0.1 # Penalty for draws
                     
                     all_play_data.append(list(zip(states, mcts_probs, winner_z)))
                     
@@ -183,7 +185,7 @@ class TrainPipeline:
             print(f"Loaded model, optimizer, and scheduler from {init_model}")
 
         # Persistent ProcessPoolExecutor
-        self.max_workers = min((self.play_batch_size + self.num_games_per_worker - 1) // self.num_games_per_worker, os.cpu_count() or 4)
+        self.max_workers = 8 # Explicitly set to 8 workers
         self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=self.max_workers)
         print(f"Initialized ProcessPoolExecutor with {self.max_workers} workers")
 
@@ -300,7 +302,7 @@ class TrainPipeline:
     def collect_selfplay_data(self, n_games=1):
         model_path = "temp_model_cublino.pt"
         # Save as TorchScript for C++ MCTS
-        script_model = torch.jit.script(self.policy_value_net)
+        script_model = torch.jit.script(self.best_policy_net)
         script_model.save(model_path)
         # time.sleep(0.1) # Small safety buffer - Removed as we are reusing workers, file lock might be an issue but usually ok for reading
         
