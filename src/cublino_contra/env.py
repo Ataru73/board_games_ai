@@ -92,6 +92,12 @@ class CublinoContraEnv(gym.Env):
              # Invalid: Not your die or empty
              return self._get_obs(), -10, True, False, {"error": "Not your die"}
 
+        # Check Backward Move
+        if self.current_player == 1 and direction == 2: # P1 cannot move South
+             return self._get_obs(), -10, True, False, {"error": "Cannot move backwards"}
+        if self.current_player == -1 and direction == 0: # P2 cannot move North
+             return self._get_obs(), -10, True, False, {"error": "Cannot move backwards"}
+
         target_row, target_col = row + dr, col + dc
 
         if not (0 <= target_row < self.board_size and 0 <= target_col < self.board_size):
@@ -234,6 +240,10 @@ class CublinoContraEnv(gym.Env):
                     # Check all 4 directions
                     # 0:N, 1:E, 2:S, 3:W
                     for direction in range(4):
+                        # P1 cannot move South (2), P2 cannot move North (0)
+                        if self.current_player == 1 and direction == 2: continue
+                        if self.current_player == -1 and direction == 0: continue
+
                         dr, dc = 0, 0
                         if direction == 0: dr = 1
                         elif direction == 1: dc = 1
