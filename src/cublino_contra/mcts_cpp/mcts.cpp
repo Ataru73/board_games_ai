@@ -314,9 +314,9 @@ public:
             for (int c = 0; c < 7; ++c) {
                 if (board[r][c][0] == current_player) {
                     // Unroll?
-                    if (r+1 < 7 && board[r+1][c][0] == 0) legal.push_back((r * 7 + c) * 4 + 0);
+                    if (r+1 < 7 && board[r+1][c][0] == 0 && current_player != -1) legal.push_back((r * 7 + c) * 4 + 0);
                     if (c+1 < 7 && board[r][c+1][0] == 0) legal.push_back((r * 7 + c) * 4 + 1);
-                    if (r-1 >= 0 && board[r-1][c][0] == 0) legal.push_back((r * 7 + c) * 4 + 2);
+                    if (r-1 >= 0 && board[r-1][c][0] == 0 && current_player != 1) legal.push_back((r * 7 + c) * 4 + 2);
                     if (c-1 >= 0 && board[r][c-1][0] == 0) legal.push_back((r * 7 + c) * 4 + 3);
                 }
             }
