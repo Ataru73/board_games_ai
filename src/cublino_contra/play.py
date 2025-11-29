@@ -117,7 +117,33 @@ camera_presets = {
     b'6': (15.0, 30.0, 0.0),    # Right-Center
 }
 
-def run_game(model_path=None, human_starts=True, difficulty=20):
+class ReplayPlayer:
+    def __init__(self, moves):
+        self.moves = moves
+        self.move_idx = 0
+        self.player = None
+        self.last_move_time = 0
+        self.move_delay = 1.0 # Seconds between moves
+
+    def set_player_ind(self, p):
+        self.player = p
+
+    def reset_player(self):
+        self.move_idx = 0
+
+    def get_action(self, env):
+        if self.move_idx < len(self.moves):
+            # Check delay
+            if time.time() - self.last_move_time < self.move_delay:
+                return None
+            
+            action = self.moves[self.move_idx]
+            self.move_idx += 1
+            self.last_move_time = time.time()
+            return action
+        return None
+
+def run_game(model_path=None, human_starts=True, difficulty=20, replay_file=None):
     # 1. Initialize Environment
     env = gym.make("CublinoContra-v0")
     env.reset()
@@ -126,55 +152,105 @@ def run_game(model_path=None, human_starts=True, difficulty=20):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Load model
-    policy_value_net = PolicyValueNet(board_size=7).to(device)
-    if model_path and os.path.exists(model_path):
-        try:
-            policy_value_net.load_state_dict(torch.load(model_path, map_location=device))
-            print(f"Loaded model from {model_path}")
-        except:
-             print(f"Could not load state dict from {model_path}. Assuming it is a script model or invalid.")
-    elif model_path:
-        print(f"Warning: Model path {model_path} does not exist. Using untrained model.")
+    if replay_file:
+        import json
+        with open(replay_file, 'r') as f:
+            data = json.load(f)
+        moves = data['moves']
+        winner = data['winner']
+        print(f"Replaying game from {replay_file}. Winner: {winner}")
+        
+        # In replay mode, both players are ReplayPlayer, sharing the move list
+        # But we need to dispatch moves to the correct player instance based on turn
+        # Actually, simpler: One ReplayPlayer instance acts for BOTH, or we have two instances
+        # that coordinate.
+        # Let's use two instances, but they need to know which moves are theirs.
+        # OR, simpler: The game loop asks the current player.
+        # If we give the full list to both, they just need to pop the next move when it's their turn.
+        # But wait, get_action is called for the current player.
+        # So if we have a shared iterator/index, it works.
+        
+        class SharedReplayState:
+            def __init__(self, moves):
+                self.moves = moves
+                self.idx = 0
+                self.last_time = time.time()
+                
+        shared_state = SharedReplayState(moves)
+        
+        class ReplayAgent:
+            def __init__(self, shared_state):
+                self.state = shared_state
+                self.player = 0
+                self.selected_square = None
+                self.legal_moves = []
+            def set_player_ind(self, p): self.player = p
+            def reset_player(self): pass
+            def get_action(self, env):
+                if self.state.idx >= len(self.state.moves): return None
+                if time.time() - self.state.last_time < 0.5: return None
+                
+                action = self.state.moves[self.state.idx]
+                self.state.idx += 1
+                self.state.last_time = time.time()
+                return action
+
+        human = ReplayAgent(shared_state)
+        ai_player = ReplayAgent(shared_state)
+        
+        human.set_player_ind(1)
+        ai_player.set_player_ind(-1)
+        
     else:
-        print("No model path provided. Using untrained model.")
-        
-    # Save model as TorchScript for C++ MCTS
-    model_path_cpp = "temp_play_model_cublino.pt"
-    script_model = torch.jit.script(policy_value_net.cpu())
-    script_model.save(model_path_cpp)
-    policy_value_net.to(device) # Move back to device if needed
-
-    def policy_value_fn(env):
-        legal_actions = env.unwrapped.get_legal_actions() # Use unwrapped for accessing method
-        board = env.unwrapped.board
-        board_tensor = torch.FloatTensor(board).permute(2, 0, 1).unsqueeze(0).to(device)
-        
-        with torch.no_grad():
-            log_act_probs, value = policy_value_net(board_tensor)
-            act_probs = np.exp(log_act_probs.cpu().numpy().flatten())
+        # Load model
+        policy_value_net = PolicyValueNet(board_size=7).to(device)
+        if model_path and os.path.exists(model_path):
+            try:
+                policy_value_net.load_state_dict(torch.load(model_path, map_location=device))
+                print(f"Loaded model from {model_path}")
+            except:
+                 print(f"Could not load state dict from {model_path}. Assuming it is a script model or invalid.")
+        elif model_path:
+            print(f"Warning: Model path {model_path} does not exist. Using untrained model.")
+        else:
+            print("No model path provided. Using untrained model.")
             
-        return zip(legal_actions, act_probs[legal_actions]), value.item()
-
-    # Difficulty
-    n_playout = difficulty * 20
-    print(f"Difficulty Level: {difficulty} (Simulations: {n_playout})")
-
-    # Players
-    human = HumanPlayer()
-    ai_player = MCTSPlayer(policy_value_fn, c_puct=5, n_playout=n_playout, use_cpp=True, model_path=model_path_cpp, device=device)
+        # Save model as TorchScript for C++ MCTS
+        model_path_cpp = "temp_play_model_cublino.pt"
+        script_model = torch.jit.script(policy_value_net.cpu())
+        script_model.save(model_path_cpp)
+        policy_value_net.to(device) # Move back to device if needed
     
-    human.set_player_ind(1 if human_starts else -1)
-    ai_player.set_player_ind(-1 if human_starts else 1)
+        def policy_value_fn(env):
+            legal_actions = env.unwrapped.get_legal_actions() # Use unwrapped for accessing method
+            board = env.unwrapped.board
+            board_tensor = torch.FloatTensor(board).permute(2, 0, 1).unsqueeze(0).to(device)
+            
+            with torch.no_grad():
+                log_act_probs, value = policy_value_net(board_tensor)
+                act_probs = np.exp(log_act_probs.cpu().numpy().flatten())
+                
+            return zip(legal_actions, act_probs[legal_actions]), value.item()
     
-    ai_player.reset_player()
+        # Difficulty
+        n_playout = difficulty * 20
+        print(f"Difficulty Level: {difficulty} (Simulations: {n_playout})")
+    
+        # Players
+        human = HumanPlayer()
+        ai_player = MCTSPlayer(policy_value_fn, c_puct=5, n_playout=n_playout, use_cpp=True, model_path=model_path_cpp, device=device)
+        
+        human.set_player_ind(1 if human_starts else -1)
+        ai_player.set_player_ind(-1 if human_starts else 1)
+        
+        ai_player.reset_player()
 
     # 3. Setup Global State for Callbacks
     global current_env, human_player_instance, ai_player_instance, current_player_is_human
     current_env = env
     human_player_instance = human
     ai_player_instance = ai_player
-    current_player_is_human = human_starts
+    current_player_is_human = human_starts if not replay_file else False # In replay, neither is "human" in the interactive sense
 
     # 4. Init OpenGL
     if not bool(glutInit):
@@ -520,7 +596,8 @@ def run_game(model_path=None, human_starts=True, difficulty=20):
             action = player.get_action(current_env)
 
         if action is not None:
-            ai_player_instance.mcts.update_with_move(action)
+            if not hasattr(ai_player_instance, 'state'): # Only update MCTS if not replaying
+                ai_player_instance.mcts.update_with_move(action)
 
             obs, reward, terminated, truncated, info = current_env.step(action)
             
@@ -548,6 +625,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, help="Path to model .pth file")
     parser.add_argument("--ai_starts", action="store_true", help="If set, AI starts first")
     parser.add_argument("--difficulty", type=int, default=20, choices=range(1, 21), help="Difficulty level (1-20)")
+    parser.add_argument("--replay", type=str, help="Path to game log JSON file for replay")
     args = parser.parse_args()
     
-    run_game(model_path=args.model, human_starts=not args.ai_starts, difficulty=args.difficulty)
+    run_game(model_path=args.model, human_starts=not args.ai_starts, difficulty=args.difficulty, replay_file=args.replay)

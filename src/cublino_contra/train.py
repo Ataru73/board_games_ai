@@ -24,7 +24,7 @@ except ImportError:
     from cublino_contra.mcts import MCTS, MCTS_CPP
     from cublino_contra.env import CublinoContraEnv
 
-def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_games_to_play_per_worker):
+def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_games_to_play_per_worker, log_game=False):
     """ Worker function for parallel self-play """
     try:
         env = CublinoContraEnv()
@@ -59,12 +59,14 @@ def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_ga
 
         all_play_data = []
         worker_game_stats = {1: 0, -1: 0, 0: 0} # 1: P1 wins, -1: P2 wins, 0: Draws
+        game_log_data = None # To store the log of the first game if requested
     
-        for _ in range(num_games_to_play_per_worker):
+        for game_idx in range(num_games_to_play_per_worker):
             env.reset()
             mcts.update_with_move(-1) # Reset MCTS tree
     
             states, mcts_probs, current_players = [], [], []
+            game_moves = [] # Store moves for logging
             
             while True:
                 # Store state as (3, 7, 7) for training
@@ -83,6 +85,9 @@ def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_ga
                 move = np.random.choice(acts, p=probs)
                 mcts.update_with_move(move)
                 
+                if log_game and game_idx == 0:
+                    game_moves.append(int(move))
+
                 obs, reward, terminated, truncated, info = env.step(move)
                 
                 if terminated or truncated:
@@ -95,15 +100,21 @@ def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_ga
                         winner_z[np.array(current_players) != winner_val] = -1.0
                     
                     all_play_data.append(list(zip(states, mcts_probs, winner_z)))
+                    
+                    if log_game and game_idx == 0:
+                        game_log_data = {
+                            "winner": int(winner_val),
+                            "moves": game_moves
+                        }
                     break
     
-        return all_play_data, worker_game_stats
+        return all_play_data, worker_game_stats, game_log_data
     except Exception as e:
         print(f"CRITICAL WORKER ERROR: {e}")
         import traceback
         traceback.print_exc()
         # Return empty results to avoid crashing main loop hard, but printed error helps debug
-        return [], {1: 0, -1: 0, 0: 0}
+        return [], {1: 0, -1: 0, 0: 0}, None
 class MCTSPlayer:
     def __init__(self, policy_value_fn, c_puct=5, n_playout=400, is_selfplay=0):
         self.mcts = MCTS(policy_value_fn, c_puct, n_playout)
@@ -287,15 +298,26 @@ class TrainPipeline:
         self.collected_games = 0
         self.batch_game_stats = {1: 0, -1: 0, 0: 0} # {P1 wins, P2 wins, Draws}
 
+        # Check for log request
+        log_game = False
+        if os.path.exists("log_game_request"):
+            print("Game log requested!")
+            log_game = True
+            try:
+                os.remove("log_game_request")
+            except:
+                pass
+
         # Use persistent executor
-        futures = [
-            self.executor.submit(run_self_play_worker, model_path, self.c_puct, self.n_playout, device_str, self.temp, self.num_games_per_worker)
-            for _ in range(num_workers)
-        ]
+        futures = []
+        for i in range(num_workers):
+            # Only ask the first worker to log a game if requested
+            do_log = log_game and (i == 0)
+            futures.append(self.executor.submit(run_self_play_worker, model_path, self.c_puct, self.n_playout, device_str, self.temp, self.num_games_per_worker, do_log))
         
         for future in concurrent.futures.as_completed(futures):
             try:
-                list_of_games, worker_game_stats = future.result()
+                list_of_games, worker_game_stats, game_log_data = future.result()
                 for game_steps in list_of_games:
                     self.total_episode_len += len(game_steps)
                     self.collected_games += 1
@@ -304,6 +326,16 @@ class TrainPipeline:
                 # Aggregate worker stats
                 for player, count in worker_game_stats.items():
                     self.batch_game_stats[player] += count
+                
+                # Save game log if returned
+                if game_log_data is not None:
+                    import json
+                    timestamp = int(time.time())
+                    filename = f"game_log_{timestamp}.json"
+                    with open(filename, 'w') as f:
+                        json.dump(game_log_data, f)
+                    print(f"Game logged to {filename}")
+
             except Exception as e:
                 print(f"Worker exception: {e}")
 
