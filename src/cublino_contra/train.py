@@ -146,8 +146,8 @@ class TrainPipeline:
         self.buffer_size = 10000
         self.batch_size = 64
         self.data_buffer = deque(maxlen=self.buffer_size)
-        self.play_batch_size = 10
-        self.num_games_per_worker = 1
+        self.play_batch_size = 20 # Increased from 10
+        self.num_games_per_worker = 5 # Increased from 1
         self.epochs = 5
         self.check_freq = 50
         self.game_batch_num = 1500
@@ -166,6 +166,11 @@ class TrainPipeline:
             checkpoint = torch.load(init_model, map_location=self.device)
             self.policy_value_net.load_state_dict(checkpoint)
             print(f"Loaded model from {init_model}")
+
+        # Persistent ProcessPoolExecutor
+        self.max_workers = min((self.play_batch_size + self.num_games_per_worker - 1) // self.num_games_per_worker, os.cpu_count() or 4)
+        self.executor = concurrent.futures.ProcessPoolExecutor(max_workers=self.max_workers)
+        print(f"Initialized ProcessPoolExecutor with {self.max_workers} workers")
 
     def policy_value_fn(self, env):
         legal_actions = env.get_legal_actions()
@@ -260,41 +265,43 @@ class TrainPipeline:
         except KeyboardInterrupt:
             print("Saving checkpoint...")
             torch.save(self.policy_value_net.state_dict(), 'checkpoint_cublino.pth')
+        finally:
+            print("Shutting down executor...")
+            self.executor.shutdown()
 
     def collect_selfplay_data(self, n_games=1):
         model_path = "temp_model_cublino.pt"
         # Save as TorchScript for C++ MCTS
         script_model = torch.jit.script(self.policy_value_net)
         script_model.save(model_path)
-        time.sleep(0.1) # Small safety buffer
+        # time.sleep(0.1) # Small safety buffer - Removed as we are reusing workers, file lock might be an issue but usually ok for reading
         
         device_str = str(self.device)
         num_workers = (n_games + self.num_games_per_worker - 1) // self.num_games_per_worker
-        max_workers = min(num_workers, os.cpu_count() or 4)
         
         self.total_episode_len = 0
         self.collected_games = 0
         self.batch_game_stats = {1: 0, -1: 0, 0: 0} # {P1 wins, P2 wins, Draws}
 
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(run_self_play_worker, model_path, self.c_puct, self.n_playout, device_str, self.temp, self.num_games_per_worker)
-                for _ in range(num_workers)
-            ]
-            
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    list_of_games, worker_game_stats = future.result()
-                    for game_steps in list_of_games:
-                        self.total_episode_len += len(game_steps)
-                        self.collected_games += 1
-                        self.data_buffer.extend(game_steps)
-                    
-                    # Aggregate worker stats
-                    for player, count in worker_game_stats.items():
-                        self.batch_game_stats[player] += count
-                except Exception as e:
-                    print(f"Worker exception: {e}")
+        # Use persistent executor
+        futures = [
+            self.executor.submit(run_self_play_worker, model_path, self.c_puct, self.n_playout, device_str, self.temp, self.num_games_per_worker)
+            for _ in range(num_workers)
+        ]
+        
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                list_of_games, worker_game_stats = future.result()
+                for game_steps in list_of_games:
+                    self.total_episode_len += len(game_steps)
+                    self.collected_games += 1
+                    self.data_buffer.extend(game_steps)
+                
+                # Aggregate worker stats
+                for player, count in worker_game_stats.items():
+                    self.batch_game_stats[player] += count
+            except Exception as e:
+                print(f"Worker exception: {e}")
 
         self.episode_len = self.total_episode_len / self.collected_games if self.collected_games > 0 else 0
 
@@ -336,8 +343,9 @@ if __name__ == "__main__":
         
     training = TrainPipeline(init_model=args.resume)
     if args.dry_run:
-        training.game_batch_num = 1
+        training.game_batch_num = 2 # Run 2 batches to verify reuse
         training.play_batch_size = 1
+        training.num_games_per_worker = 1
         training.n_playout = 10
         training.epochs = 1
         
