@@ -165,7 +165,7 @@ class TrainPipeline:
         self.buffer_size = 10000
         self.batch_size = 256
         self.data_buffer = deque(maxlen=self.buffer_size)
-        self.play_batch_size = 20 # Increased from 10
+        self.play_batch_size = 40 # Increased from 20 to use 8 workers (40/5=8)
         self.num_games_per_worker = 5 # Increased from 1
         self.epochs = 5
         self.check_freq = 50
