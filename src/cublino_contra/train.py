@@ -30,28 +30,33 @@ def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_ga
     try:
         env = CublinoContraEnv()
         
-        use_cpp = True
-        try:
-            mcts = MCTS_CPP(model_path, c_puct, n_playout, device_str)
-        except Exception as e:
-            print(f"Worker failed to use C++ MCTS: {e}. Falling back to Python MCTS.")
-            use_cpp = False
+        # Disable C++ MCTS for now - it doesn't support 12-channel observations yet
+        use_cpp = False
+        # try:
+        #     mcts = MCTS_CPP(model_path, c_puct, n_playout, device_str)
+        # except Exception as e:
+        #     print(f"Worker failed to use C++ MCTS: {e}. Falling back to Python MCTS.")
+        #     use_cpp = False
+        
+        if not use_cpp:
             device = torch.device(device_str)
-            # Load model
+            # Load model - handle TorchScript format
             policy_value_net = PolicyValueNet(board_size=7).to(device)
-            policy_value_net.load_state_dict(torch.load(model_path, map_location=device))
+            # The model_path is a TorchScript file, so load it and extract state_dict
+            scripted_model = torch.jit.load(model_path, map_location=device)
+            policy_value_net.load_state_dict(scripted_model.state_dict())
             policy_value_net.eval()
             
             def policy_value_fn(state):
                 # state is the env
                 legal_actions = state.get_legal_actions()
                 
-                board = state.board
-                # Convert to tensor: (1, 3, 7, 7)
-                board_tensor = torch.FloatTensor(board).permute(2, 0, 1).unsqueeze(0).to(device)
+                obs = state._get_obs()  # Get stacked observation (7, 7, 12)
+                # Convert to tensor: (1, 12, 7, 7)
+                obs_tensor = torch.FloatTensor(obs).permute(2, 0, 1).unsqueeze(0).to(device)
                 
                 with torch.no_grad():
-                    log_act_probs, value = policy_value_net(board_tensor)
+                    log_act_probs, value = policy_value_net(obs_tensor)
                     act_probs = np.exp(log_act_probs.cpu().numpy().flatten())
                     
                 return zip(legal_actions, act_probs[legal_actions]), value.item()
@@ -70,12 +75,12 @@ def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_ga
             game_moves = [] # Store moves for logging
             
             while True:
-                # Store state as (3, 7, 7) for training
-                board = env.board
-                state_tensor = np.transpose(board, (2, 0, 1)) # (3, 7, 7)
+                # Store state as (12, 7, 7) for training - 4 stacked states * 3 channels
+                obs = env._get_obs()  # Get stacked observation (7, 7, 12)
+                state_tensor = np.transpose(obs, (2, 0, 1))  # (12, 7, 7)
                 states.append(state_tensor)
                 
-                acts, probs = mcts.get_move_probs(env, temp=temp if len(states) < 30 else 1e-3)
+                acts, probs = mcts.get_move_probs(env, temp=temp if len(states) < 100 else 1e-3)
                 
                 prob_vec = np.zeros(196) # 7*7*4
                 for a, p in zip(acts, probs):
@@ -100,7 +105,7 @@ def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_ga
                         winner_z[np.array(current_players) == winner_val] = 1.0
                         winner_z[np.array(current_players) != winner_val] = -1.0
                     else: # Draw
-                        winner_z[:] = -0.1 # Penalty for draws
+                        winner_z[:] = -1.0 # Penalty for draws
                     
                     all_play_data.append(list(zip(states, mcts_probs, winner_z)))
                     
@@ -136,7 +141,7 @@ class MCTSPlayer:
                 # Dirichlet Noise
                 move = np.random.choice(
                     acts,
-                    p=0.75*probs + 0.25*np.random.dirichlet(0.3*np.ones(len(probs)))
+                    p=0.75*probs + 0.25*np.random.dirichlet(0.6*np.ones(len(probs)))
                 )
                 self.mcts.update_with_move(move)
             else:
@@ -191,11 +196,11 @@ class TrainPipeline:
 
     def policy_value_fn(self, env):
         legal_actions = env.get_legal_actions()
-        board = env.board
-        board_tensor = torch.FloatTensor(board).permute(2, 0, 1).unsqueeze(0).to(self.device)
+        obs = env._get_obs()  # Get stacked observation (7, 7, 12)
+        obs_tensor = torch.FloatTensor(obs).permute(2, 0, 1).unsqueeze(0).to(self.device)
         
         with torch.no_grad():
-            log_act_probs, value = self.policy_value_net(board_tensor)
+            log_act_probs, value = self.policy_value_net(obs_tensor)
             act_probs = np.exp(log_act_probs.cpu().numpy().flatten())
             
         return zip(legal_actions, act_probs[legal_actions]), value.item()
@@ -203,10 +208,10 @@ class TrainPipeline:
     def get_policy_value_fn(self, policy_value_net):
         def policy_value_fn(env):
             legal_actions = env.get_legal_actions()
-            board = env.board
-            board_tensor = torch.FloatTensor(board).permute(2, 0, 1).unsqueeze(0).to(self.device)
+            obs = env._get_obs()  # Get stacked observation (7, 7, 12)
+            obs_tensor = torch.FloatTensor(obs).permute(2, 0, 1).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                log_act_probs, value = policy_value_net(board_tensor)
+                log_act_probs, value = policy_value_net(obs_tensor)
                 act_probs = np.exp(log_act_probs.cpu().numpy().flatten())
             return zip(legal_actions, act_probs[legal_actions]), value.item()
         return policy_value_fn

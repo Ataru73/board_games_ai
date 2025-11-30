@@ -29,7 +29,9 @@ struct Neighbors {
 
 class CublinoState {
 public:
-    std::array<std::array<std::array<int, 3>, 7>, 7> board;
+    using BoardType = std::array<std::array<std::array<int, 3>, 7>, 7>;
+    BoardType board;
+    std::deque<BoardType> state_history; // Store last 4 states
     int current_player;
     int board_size = 7;
     int step_count = 0;
@@ -50,6 +52,7 @@ public:
         current_player = 1;
         step_count = 0;
         history.clear();
+        state_history.clear();
 
         // Setup P1 (Row 0)
         for (int col = 0; col < 7; ++col) {
@@ -63,6 +66,11 @@ public:
             board[6][col][0] = -1;
             board[6][col][1] = 6;
             board[6][col][2] = 4;
+        }
+        
+        // Initialize history with 4 copies of initial state
+        for(int i=0; i<4; ++i) {
+            state_history.push_back(board);
         }
         
         record_history();
@@ -97,6 +105,7 @@ public:
     CublinoState copy() const {
         CublinoState new_state;
         new_state.board = board;
+        new_state.state_history = state_history;
         new_state.current_player = current_player;
         new_state.history = history;
         new_state.step_count = step_count;
@@ -144,6 +153,12 @@ public:
         board[target_row][target_col][0] = current_player;
         board[target_row][target_col][1] = new_top;
         board[target_row][target_col][2] = new_south;
+        
+        // Update State History
+        state_history.push_back(board);
+        if (state_history.size() > 4) {
+            state_history.pop_front();
+        }
 
         // Check Win
         if (current_player == 1 && target_row == 6) return {1, true};
@@ -282,6 +297,16 @@ public:
             board[dice_to_remove[i].first][dice_to_remove[i].second][1] = 0;
             board[dice_to_remove[i].first][dice_to_remove[i].second][2] = 0;
         }
+        
+        // Also update history with battle results?
+        // step() updates history AFTER resolve_battles in my logic above?
+        // Wait, I pushed to history BEFORE resolve_battles in step().
+        // FIX: Should push to history AFTER all modifications.
+        // Let's fix step().
+        // Actually, I can just update the back of history if I already pushed.
+        if (remove_count > 0) {
+             state_history.back() = board;
+        }
     }
 
     Neighbors get_neighbors_fast(int r, int c) {
@@ -295,14 +320,27 @@ public:
 
     torch::Tensor get_obs() const {
         auto options = torch::TensorOptions().dtype(torch::kFloat32);
-        torch::Tensor obs = torch::zeros({1, 3, 7, 7}, options);
-        // Can be optimized by direct pointer access if bottleneck
-        for (int r = 0; r < 7; ++r) {
-            for (int c = 0; c < 7; ++c) {
-                obs[0][0][r][c] = (float)board[r][c][0];
-                obs[0][1][r][c] = (float)board[r][c][1];
-                obs[0][2][r][c] = (float)board[r][c][2];
+        // 12 channels: 4 states * 3 channels
+        torch::Tensor obs = torch::zeros({1, 12, 7, 7}, options);
+        
+        // Iterate over history. state_history[0] is oldest.
+        // We want oldest -> newest? 
+        // Python: `np.concatenate(list(self.state_history), axis=2)`
+        // state_history is deque, appended to right.
+        // So index 0 is oldest.
+        // Concatenate on axis 2 (channels).
+        // So channels 0-2: Oldest. 9-11: Newest.
+        
+        int channel_offset = 0;
+        for (const auto& state_board : state_history) {
+            for (int r = 0; r < 7; ++r) {
+                for (int c = 0; c < 7; ++c) {
+                    obs[0][channel_offset + 0][r][c] = (float)state_board[r][c][0];
+                    obs[0][channel_offset + 1][r][c] = (float)state_board[r][c][1];
+                    obs[0][channel_offset + 2][r][c] = (float)state_board[r][c][2];
+                }
             }
+            channel_offset += 3;
         }
         return obs;
     }
@@ -325,11 +363,28 @@ public:
     }
     
     void set_state_from_python(py::array_t<int> board_np, int player) {
+        // board_np shape: (7, 7, 12)
         auto r = board_np.unchecked<3>();
-        for (int i = 0; i < 7; ++i)
-            for (int j = 0; j < 7; ++j)
-                for (int k = 0; k < 3; ++k)
-                    board[i][j][k] = r(i, j, k);
+        
+        state_history.clear();
+        
+        // Extract 4 states
+        for (int s = 0; s < 4; ++s) {
+            BoardType b;
+            int ch_start = s * 3;
+            for (int i = 0; i < 7; ++i) {
+                for (int j = 0; j < 7; ++j) {
+                    b[i][j][0] = r(i, j, ch_start + 0);
+                    b[i][j][1] = r(i, j, ch_start + 1);
+                    b[i][j][2] = r(i, j, ch_start + 2);
+                }
+            }
+            state_history.push_back(b);
+        }
+        
+        // Set current board to the last one
+        board = state_history.back();
+        
         current_player = player;
         step_count = 0;
         history.clear();
@@ -875,6 +930,7 @@ PYBIND11_MODULE(_mcts_cpp, m) {
         })
         .def("set_state_from_python", &CublinoState::set_state_from_python)
         .def("get_obs", &CublinoState::get_obs)
+        .def("get_legal_actions", &CublinoState::get_legal_actions)
         .def_readwrite("current_player", &CublinoState::current_player);
 
     py::class_<MCTS>(m, "MCTS")

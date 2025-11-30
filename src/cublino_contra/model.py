@@ -19,7 +19,7 @@ class ResidualBlock(nn.Module):
         return out
 
 class PolicyValueNet(nn.Module):
-    def __init__(self, board_size=7, num_channels=3, num_res_blocks=4):
+    def __init__(self, board_size=7, num_channels=12, num_res_blocks=4):
         super(PolicyValueNet, self).__init__()
         self.board_size = board_size
         
@@ -44,7 +44,7 @@ class PolicyValueNet(nn.Module):
         self.value_fc2 = nn.Linear(64, 1)
 
     def forward(self, x):
-        # Input: (N, 3, 7, 7)
+        # Input: (N, 12, 7, 7) - 4 stacked states * 3 channels each
 
         # Normalize input
         x = x / 6.0

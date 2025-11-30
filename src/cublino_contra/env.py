@@ -1,6 +1,7 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
+from collections import deque
 
 class CublinoContraEnv(gym.Env):
     metadata = {"render_modes": ["ascii", "ansi"]}
@@ -8,13 +9,15 @@ class CublinoContraEnv(gym.Env):
     def __init__(self, render_mode=None):
         self.render_mode = render_mode
         self.board_size = 7
+        self.history_length = 4  # Stack last 4 board states
         
-        # Observation Space: 7x7 grid with 3 channels
+        # Observation Space: 7x7 grid with 12 channels (4 stacked states * 3 channels each)
+        # Each state has 3 channels:
         # Channel 0: Player (0: Empty, 1: P1, -1: P2)
         # Channel 1: Top Value (0: Empty, 1-6)
         # Channel 2: South Value (0: Empty, 1-6)
         self.observation_space = spaces.Box(
-            low=-1, high=6, shape=(self.board_size, self.board_size, 3), dtype=np.int8
+            low=-1, high=6, shape=(self.board_size, self.board_size, 3 * self.history_length), dtype=np.int8
         )
 
         # Action Space: Select a square (row, col) and a direction (0:N, 1:E, 2:S, 3:W)
@@ -32,7 +35,10 @@ class CublinoContraEnv(gym.Env):
         }
         self._vec_to_val = {tuple(v): k for k, v in self._val_to_vec.items()}
         
-        self.max_steps = 200
+        self.max_steps = 300
+        
+        # Initialize state history buffer
+        self.state_history = deque(maxlen=self.history_length)
 
         self.reset()
 
@@ -52,6 +58,11 @@ class CublinoContraEnv(gym.Env):
         for col in range(self.board_size):
             self.board[6, col] = [-1, 6, 4]
             
+        # Initialize state history with copies of initial board
+        self.state_history.clear()
+        for _ in range(self.history_length):
+            self.state_history.append(self.board.copy())
+        
         # Draw history for 3-fold repetition
         self.history = {}
         # Add initial state
@@ -65,7 +76,9 @@ class CublinoContraEnv(gym.Env):
         return (bytes(self.board), self.current_player)
 
     def _get_obs(self):
-        return self.board.copy()
+        # Stack the last history_length board states along the channel dimension
+        # Returns shape: (7, 7, 12) where 12 = 4 states * 3 channels
+        return np.concatenate(list(self.state_history), axis=2)
 
     def step(self, action):
         # Decode action
@@ -114,6 +127,9 @@ class CublinoContraEnv(gym.Env):
         # Update Board
         self.board[row, col] = [0, 0, 0]
         self.board[target_row, target_col] = [self.current_player, new_top, new_south]
+        
+        # Update state history
+        self.state_history.append(self.board.copy())
 
         # Check Win Condition (Reached opponent's back row)
         # P1 target: Row 6

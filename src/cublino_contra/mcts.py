@@ -120,8 +120,10 @@ class MCTS_CPP:
     def _convert_env_to_cpp_state(self, env):
         cpp_state = _mcts_cpp.CublinoState()
         
-        # Convert board (7, 7, 3) to numpy array then to C++
+        # Convert stacked observation (7, 7, 12) to numpy array then to C++
         # pybind11 handles numpy -> py::array_t automatically
-        cpp_state.set_state_from_python(env.unwrapped.board, env.unwrapped.current_player)
+        # NOTE: The C++ extension must be rebuilt to handle 12-channel input
+        stacked_obs = env.unwrapped._get_obs()  # Get 12-channel stacked observation
+        cpp_state.set_state_from_python(stacked_obs, env.unwrapped.current_player)
         
         return cpp_state
