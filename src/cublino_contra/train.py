@@ -27,16 +27,18 @@ except ImportError:
 
 def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_games_to_play_per_worker, log_game=False):
     """ Worker function for parallel self-play """
+    torch.set_num_threads(1)
+    os.environ["OMP_NUM_THREADS"] = "1"
     try:
         env = CublinoContraEnv()
         
-        # Disable C++ MCTS for now - it doesn't support 12-channel observations yet
-        use_cpp = False
-        # try:
-        #     mcts = MCTS_CPP(model_path, c_puct, n_playout, device_str)
-        # except Exception as e:
-        #     print(f"Worker failed to use C++ MCTS: {e}. Falling back to Python MCTS.")
-        #     use_cpp = False
+        # Enable C++ MCTS
+        use_cpp = True
+        try:
+            mcts = MCTS_CPP(model_path, c_puct, n_playout, device_str)
+        except Exception as e:
+            print(f"Worker failed to use C++ MCTS: {e}. Falling back to Python MCTS.")
+            use_cpp = False
         
         if not use_cpp:
             device = torch.device(device_str)
@@ -80,6 +82,22 @@ def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_ga
                 state_tensor = np.transpose(obs, (2, 0, 1))  # (12, 7, 7)
                 states.append(state_tensor)
                 
+                legal_moves = env.get_legal_actions()
+                if len(legal_moves) == 0:
+                    # No legal moves - Loss for current player
+                    winner_val = -env.current_player
+                    worker_game_stats[winner_val] += 1
+                    
+                    winner_z = np.zeros(len(current_players))
+                    if winner_val != 0:
+                        winner_z[np.array(current_players) == winner_val] = 1.0
+                        winner_z[np.array(current_players) != winner_val] = -1.0
+                    else: 
+                        winner_z[:] = -1.0
+                    
+                    all_play_data.append(list(zip(states, mcts_probs, winner_z)))
+                    break
+
                 acts, probs = mcts.get_move_probs(env, temp=temp if len(states) < 100 else 1e-3)
                 
                 prob_vec = np.zeros(196) # 7*7*4
