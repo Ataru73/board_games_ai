@@ -618,7 +618,11 @@ def run_game(model_path=None, human_starts=True, difficulty=20, replay_file=None
             obs, reward, terminated, truncated, info = current_env.step(action)
             
             if terminated:
-                print(f"Game Over. Winner: {current_env.unwrapped.current_player}")
+                winner = info.get('winner', 0)
+                if winner == 0:
+                     print("Game Over. Draw!")
+                else:
+                     print(f"Game Over. Winner: {winner}")
                 print("Press any key to exit.")
                 game_over = True
             elif truncated:
