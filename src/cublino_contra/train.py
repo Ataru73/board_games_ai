@@ -300,7 +300,7 @@ class TrainPipeline:
                         print(f"Draws: {win_cnt[0]}")
                         
                         win_ratio = 1.0 * win_cnt[1] / (sum(win_cnt.values()))
-                        if win_ratio >= 0.55:
+                        if win_ratio >= 0.5:
                             print("New best policy!")
                             self.best_policy_net.load_state_dict(self.policy_value_net.state_dict())
                             torch.save({
