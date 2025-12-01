@@ -25,7 +25,7 @@ except ImportError:
     from cublino_contra.mcts import MCTS, MCTS_CPP
     from cublino_contra.env import CublinoContraEnv
 
-def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_games_to_play_per_worker, log_game=False):
+def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_games_to_play_per_worker, draw_reward, log_game=False):
     """ Worker function for parallel self-play """
     torch.set_num_threads(1)
     os.environ["OMP_NUM_THREADS"] = "1"
@@ -75,6 +75,8 @@ def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_ga
     
             states, mcts_probs, current_players = [], [], []
             game_moves = [] # Store moves for logging
+            divergence_detected = False
+            illegal_moves_log = []
             
             while True:
                 # Store state as (12, 7, 7) for training - 4 stacked states * 3 channels
@@ -93,13 +95,36 @@ def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_ga
                         winner_z[np.array(current_players) == winner_val] = 1.0
                         winner_z[np.array(current_players) != winner_val] = -1.0
                     else: 
-                        winner_z[:] = -0.2
+                        winner_z[:] = draw_reward
                     
                     all_play_data.append(list(zip(states, mcts_probs, winner_z)))
                     break
 
                 acts, probs = mcts.get_move_probs(env, temp=temp if len(states) < 100 else 1e-3)
                 
+                # Safety Filter: Ensure MCTS only proposes legal moves
+                # This handles rare state divergence issues
+                legal_acts_set = set(legal_moves)
+                valid_indices = [i for i, a in enumerate(acts) if a in legal_acts_set]
+                
+                if len(valid_indices) < len(acts):
+                    divergence_detected = True
+                    illegal_ones = [a for a in acts if a not in legal_acts_set]
+                    illegal_moves_log.append({"step": len(game_moves), "illegal_acts": illegal_ones})
+                    # print(f"WARNING: MCTS proposed illegal moves: {illegal_ones}")
+
+                if not valid_indices:
+                    # print(f"WARNING: MCTS proposed NO legal moves! Acts: {acts}, Legal: {legal_moves}")
+                    # Fallback: Uniform random legal move
+                    acts = legal_moves
+                    probs = np.ones(len(legal_moves)) / len(legal_moves)
+                else:
+                    acts = [acts[i] for i in valid_indices]
+                    probs = [probs[i] for i in valid_indices]
+                    # Renormalize
+                    probs = np.array(probs)
+                    probs /= probs.sum()
+
                 prob_vec = np.zeros(196) # 7*7*4
                 for a, p in zip(acts, probs):
                     prob_vec[a] = p
@@ -109,12 +134,30 @@ def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_ga
                 move = np.random.choice(acts, p=probs)
                 mcts.update_with_move(move)
                 
-                if log_game and game_idx == 0:
-                    game_moves.append(int(move))
+                game_moves.append(int(move))
 
                 obs, reward, terminated, truncated, info = env.step(move)
                 
                 if terminated or truncated:
+                    if 'error' in info or divergence_detected:
+                        import json
+                        timestamp = int(time.time())
+                        suffix = random.randint(0, 10000)
+                        log_type = "error" if 'error' in info else "divergence"
+                        filename = f"{log_type}_log_{timestamp}_{suffix}.json"
+                        error_log_data = {
+                            "winner": 0,
+                            "moves": game_moves,
+                            "error": info.get('error', 'MCTS proposed illegal moves'),
+                            "divergence_details": illegal_moves_log
+                        }
+                        try:
+                            with open(filename, 'w') as f:
+                                json.dump(error_log_data, f)
+                            print(f"{log_type.capitalize()} logged to {filename}")
+                        except Exception as e:
+                            print(f"Failed to write log: {e}")
+
                     winner_val = info.get('winner', 0)
                     worker_game_stats[winner_val] += 1
                     
@@ -123,7 +166,7 @@ def run_self_play_worker(model_path, c_puct, n_playout, device_str, temp, num_ga
                         winner_z[np.array(current_players) == winner_val] = 1.0
                         winner_z[np.array(current_players) != winner_val] = -1.0
                     else: # Draw
-                        winner_z[:] = -1.0 # Penalty for draws
+                        winner_z[:] = draw_reward # Penalty for draws
                     
                     all_play_data.append(list(zip(states, mcts_probs, winner_z)))
                     
@@ -174,7 +217,7 @@ class MCTSPlayer:
             return -1
 
 class TrainPipeline:
-    def __init__(self, init_model=None):
+    def __init__(self, init_model=None, draw_reward=-0.2):
         self.board_size = 7
         self.learn_rate = 2e-3
         self.temp = 1.0
@@ -189,6 +232,7 @@ class TrainPipeline:
         self.check_freq = 50
         self.game_batch_num = 1500
         self.episode_len = 0
+        self.draw_reward = draw_reward
         
         self.env = CublinoContraEnv()
         self.eval_env = CublinoContraEnv()
@@ -351,7 +395,7 @@ class TrainPipeline:
         for i in range(num_workers):
             # Only ask the first worker to log a game if requested
             do_log = log_game and (i == 0)
-            futures.append(self.executor.submit(run_self_play_worker, model_path, self.c_puct, self.n_playout, device_str, self.temp, self.num_games_per_worker, do_log))
+            futures.append(self.executor.submit(run_self_play_worker, model_path, self.c_puct, self.n_playout, device_str, self.temp, self.num_games_per_worker, self.draw_reward, do_log))
         
         for future in concurrent.futures.as_completed(futures):
             try:
@@ -407,6 +451,7 @@ class TrainPipeline:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--draw_reward", type=float, default=-0.2, help="Reward for a draw (default: -0.2)")
     parser.add_argument("--dry_run", action="store_true")
     args = parser.parse_args()
 
@@ -415,7 +460,7 @@ if __name__ == "__main__":
     except RuntimeError:
         pass
         
-    training = TrainPipeline(init_model=args.resume)
+    training = TrainPipeline(init_model=args.resume, draw_reward=args.draw_reward)
     if args.dry_run:
         training.game_batch_num = 2 # Run 2 batches to verify reuse
         training.play_batch_size = 1

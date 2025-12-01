@@ -351,11 +351,27 @@ public:
         for (int r = 0; r < 7; ++r) {
             for (int c = 0; c < 7; ++c) {
                 if (board[r][c][0] == current_player) {
-                    // Unroll?
-                    if (r+1 < 7 && board[r+1][c][0] == 0 && current_player != -1) legal.push_back((r * 7 + c) * 4 + 0);
-                    if (c+1 < 7 && board[r][c+1][0] == 0) legal.push_back((r * 7 + c) * 4 + 1);
-                    if (r-1 >= 0 && board[r-1][c][0] == 0 && current_player != 1) legal.push_back((r * 7 + c) * 4 + 2);
-                    if (c-1 >= 0 && board[r][c-1][0] == 0) legal.push_back((r * 7 + c) * 4 + 3);
+                    for (int direction = 0; direction < 4; ++direction) {
+                        // Player 1 cannot move backward (South, dr=-1, dir 2)
+                        if (current_player == 1 && direction == 2) continue;
+                        // Player -1 cannot move backward (North, dr=1, dir 0)
+                        if (current_player == -1 && direction == 0) continue;
+
+                        int dr = 0, dc = 0;
+                        if (direction == 0) dr = 1;
+                        else if (direction == 1) dc = 1;
+                        else if (direction == 2) dr = -1;
+                        else if (direction == 3) dc = -1;
+                        
+                        int target_r = r + dr;
+                        int target_c = c + dc;
+
+                        if (target_r >= 0 && target_r < 7 && target_c >= 0 && target_c < 7) {
+                            if (board[target_r][target_c][0] == 0) {
+                                legal.push_back((r * 7 + c) * 4 + direction);
+                            }
+                        }
+                    }
                 }
             }
         }
