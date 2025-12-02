@@ -6,6 +6,7 @@ import numpy as np
 import argparse
 import sys
 import time
+import json
 
 os.environ['PYOPENGL_PLATFORM'] = 'glx'
 from OpenGL.GL import *
@@ -96,6 +97,7 @@ mouse_right_down = False
 last_mouse_x = 0
 last_mouse_y = 0
 game_over = False
+game_moves = []  # Track all moves for export
 
 # Fixed camera presets for numpad keys (distance, angle_x, angle_y)
 camera_presets = {
@@ -155,7 +157,6 @@ def run_game(model_path=None, human_starts=True, difficulty=20, replay_file=None
     print(f"Using device: {device}")
 
     if replay_file:
-        import json
         with open(replay_file, 'r') as f:
             data = json.load(f)
         moves = data['moves']
@@ -253,11 +254,12 @@ def run_game(model_path=None, human_starts=True, difficulty=20, replay_file=None
         ai_player.reset_player()
 
     # 3. Setup Global State for Callbacks
-    global current_env, human_player_instance, ai_player_instance, current_player_is_human
+    global current_env, human_player_instance, ai_player_instance, current_player_is_human, game_moves
     current_env = env
     human_player_instance = human
     ai_player_instance = ai_player
     current_player_is_human = human_starts if not replay_file else False # In replay, neither is "human" in the interactive sense
+    game_moves = []  # Reset game moves list
 
     # 4. Init OpenGL
     if not bool(glutInit):
@@ -612,7 +614,9 @@ def run_game(model_path=None, human_starts=True, difficulty=20, replay_file=None
             action = player.get_action(current_env)
 
         if action is not None:
-            if not hasattr(ai_player_instance, 'state'): # Only update MCTS if not replaying
+            # Track move for export (only for non-replay games)
+            if not hasattr(ai_player_instance, 'state'):
+                game_moves.append(int(action))
                 ai_player_instance.mcts.update_with_move(action)
 
             obs, reward, terminated, truncated, info = current_env.step(action)
@@ -623,10 +627,42 @@ def run_game(model_path=None, human_starts=True, difficulty=20, replay_file=None
                      print("Game Over. Draw!")
                 else:
                      print(f"Game Over. Winner: {winner}")
+                
+                # Export game log for non-replay games
+                if not hasattr(ai_player_instance, 'state'):
+                    timestamp = int(time.time())
+                    filename = f"game_log_{timestamp}.json"
+                    game_log_data = {
+                        "winner": int(winner),
+                        "moves": game_moves
+                    }
+                    try:
+                        with open(filename, 'w') as f:
+                            json.dump(game_log_data, f)
+                        print(f"Game logged to {filename}")
+                    except Exception as e:
+                        print(f"Failed to save game log: {e}")
+                
                 print("Press any key to exit.")
                 game_over = True
             elif truncated:
                 print("Game Over. Draw!")
+                
+                # Export game log for non-replay games (draw)
+                if not hasattr(ai_player_instance, 'state'):
+                    timestamp = int(time.time())
+                    filename = f"game_log_{timestamp}.json"
+                    game_log_data = {
+                        "winner": 0,
+                        "moves": game_moves
+                    }
+                    try:
+                        with open(filename, 'w') as f:
+                            json.dump(game_log_data, f)
+                        print(f"Game logged to {filename}")
+                    except Exception as e:
+                        print(f"Failed to save game log: {e}")
+                
                 print("Press any key to exit.")
                 game_over = True
             
