@@ -245,11 +245,17 @@ class TrainPipeline:
         self.scheduler = lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.game_batch_num, eta_min=1e-5)
 
         if init_model:
-            checkpoint = torch.load(init_model, map_location=self.device)
+            import numpy
+            torch.serialization.add_safe_globals([numpy.ndarray, numpy._core.multiarray._reconstruct])
+            checkpoint = torch.load(init_model, map_location=self.device, weights_only=False)
             self.policy_value_net.load_state_dict(checkpoint['policy_value_net'])
             self.optimizer.load_state_dict(checkpoint['optimizer'])
             self.scheduler.load_state_dict(checkpoint['scheduler'])
-            print(f"Loaded model, optimizer, and scheduler from {init_model}")
+            if 'data_buffer' in checkpoint:
+                self.data_buffer = deque(checkpoint['data_buffer'], maxlen=self.buffer_size)
+            if 'episode_len' in checkpoint:
+                self.episode_len = checkpoint['episode_len']
+            print(f"Loaded model, optimizer, scheduler, data_buffer, and episode_len from {init_model}")
 
         # Persistent ProcessPoolExecutor
         self.max_workers = 8 # Explicitly set to 8 workers
@@ -336,24 +342,25 @@ class TrainPipeline:
                     self.scheduler.step()
                     print(f"Loss: {loss:.4f}, Entropy: {entropy:.4f}")
                     
-                    if (i+1) % self.check_freq == 0:
-                        print("Evaluating...")
-                        win_cnt = self.evaluate_policy(n_games=10)
-                        print(f"Current Policy Wins: {win_cnt[1]}")
-                        print(f"Best Policy Wins: {win_cnt[-1]}")
-                        print(f"Draws: {win_cnt[0]}")
-                        
-                        win_ratio = 1.0 * win_cnt[1] / (sum(win_cnt.values()))
-                        if win_ratio >= 0.5:
-                            print("New best policy!")
-                            self.best_policy_net.load_state_dict(self.policy_value_net.state_dict())
-                            torch.save({
-                                'policy_value_net': self.policy_value_net.state_dict(),
-                                'optimizer': self.optimizer.state_dict(),
-                                'scheduler': self.scheduler.state_dict(),
-                            }, f'current_policy_cublino_{i+1}.pth')
-                        else:
-                            print("Not better.")
+                if (i+1) % self.check_freq == 0:
+                    print("Evaluating...")
+                    win_cnt = self.evaluate_policy(n_games=10)
+                    print(f"Current Policy Wins: {win_cnt[1]}")
+                    print(f"Best Policy Wins: {win_cnt[-1]}")
+                    print(f"Draws: {win_cnt[0]}")
+                    
+                    # Always update best_policy_net to keep data generation fresh
+                    print("Updating self-play model to latest version...")
+                    self.best_policy_net.load_state_dict(self.policy_value_net.state_dict())
+                    
+                    # Save checkpoint regardless of win rate
+                    torch.save({
+                        'policy_value_net': self.policy_value_net.state_dict(),
+                        'optimizer': self.optimizer.state_dict(),
+                        'scheduler': self.scheduler.state_dict(),
+                        'data_buffer': list(self.data_buffer),
+                        'episode_len': self.episode_len,
+                    }, f'current_policy_cublino_{i+1}.pth')
                             
         except KeyboardInterrupt:
             print("Saving checkpoint...")
@@ -361,6 +368,8 @@ class TrainPipeline:
                 'policy_value_net': self.policy_value_net.state_dict(),
                 'optimizer': self.optimizer.state_dict(),
                 'scheduler': self.scheduler.state_dict(),
+                'data_buffer': list(self.data_buffer), # Convert deque to list for saving
+                'episode_len': self.episode_len,
             }, 'checkpoint_cublino.pth')
         finally:
             print("Shutting down executor...")
