@@ -248,7 +248,7 @@ class MCTSPlayer:
             return -1
 
 class TrainPipeline:
-    def __init__(self, init_model=None, draw_reward=-0.2):
+    def __init__(self, init_model=None, draw_reward=-0.2, reset_scheduler=False):
         self.board_size = 7
         self.learn_rate = 1e-2
         self.temp = 1.0
@@ -281,12 +281,18 @@ class TrainPipeline:
             checkpoint = torch.load(init_model, map_location=self.device, weights_only=False)
             self.policy_value_net.load_state_dict(checkpoint['policy_value_net'])
             self.optimizer.load_state_dict(checkpoint['optimizer'])
-            self.scheduler.load_state_dict(checkpoint['scheduler'])
+            if not reset_scheduler:
+                self.scheduler.load_state_dict(checkpoint['scheduler'])
             if 'data_buffer' in checkpoint:
                 self.data_buffer = deque(checkpoint['data_buffer'], maxlen=self.buffer_size)
             if 'episode_len' in checkpoint:
                 self.episode_len = checkpoint['episode_len']
-            print(f"Loaded model, optimizer, scheduler, data_buffer, and episode_len from {init_model}")
+            
+            loaded_items = "model, optimizer"
+            if not reset_scheduler:
+                loaded_items += ", scheduler"
+            loaded_items += ", data_buffer, and episode_len"
+            print(f"Loaded {loaded_items} from {init_model}")
 
         # Persistent ProcessPoolExecutor
         self.max_workers = 8 # Explicitly set to 8 workers
@@ -494,6 +500,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--draw_reward", type=float, default=-0.0, help="Reward for a draw (default: -0.0)")
+    parser.add_argument("--reset_scheduler", action="store_true", help="Reset scheduler state when resuming")
     parser.add_argument("--dry_run", action="store_true")
     args = parser.parse_args()
 
@@ -502,7 +509,7 @@ if __name__ == "__main__":
     except RuntimeError:
         pass
         
-    training = TrainPipeline(init_model=args.resume, draw_reward=args.draw_reward)
+    training = TrainPipeline(init_model=args.resume, draw_reward=args.draw_reward, reset_scheduler=args.reset_scheduler)
     if args.dry_run:
         training.game_batch_num = 2 # Run 2 batches to verify reuse
         training.play_batch_size = 1
