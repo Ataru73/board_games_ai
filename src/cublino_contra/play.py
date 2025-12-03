@@ -74,6 +74,11 @@ class MCTSPlayer:
     def get_action(self, env):
         legal_moves = env.unwrapped.get_legal_actions()
         if len(legal_moves) > 0:
+            # Print NN evaluation
+            if self._policy_value_function:
+                _, value = self._policy_value_function(env)
+                print(f"NN Evaluation: Value: {value:.4f}")
+
             acts, probs = self.mcts.get_move_probs(env, temp=1e-3)
             move = acts[np.argmax(probs)]
             return move
@@ -241,8 +246,9 @@ def run_game(model_path=None, human_starts=True, difficulty=20, replay_file=None
     
         def policy_value_fn(env):
             legal_actions = env.unwrapped.get_legal_actions() # Use unwrapped for accessing method
-            board = env.unwrapped.board
-            board_tensor = torch.FloatTensor(board).permute(2, 0, 1).unsqueeze(0).to(device)
+            # Use _get_obs() to get the full 12-channel observation (history of 4 states)
+            obs = env.unwrapped._get_obs()
+            board_tensor = torch.FloatTensor(obs).permute(2, 0, 1).unsqueeze(0).to(device)
             
             with torch.no_grad():
                 log_act_probs, value = policy_value_net(board_tensor)
