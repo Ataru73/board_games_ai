@@ -231,6 +231,49 @@ def generate_marble_texture(width=512, height=512):
     
     return tex_id
 
+def generate_wood_texture(base_color, vein_color, width=256, height=256):
+    # Procedural Wood Texture
+    # Formula: value = sin(x * freq + turb * amp)
+    
+    # 1. Noise for turbulence
+    noise = np.random.rand(width, height)
+    # Smooth noise
+    for _ in range(3):
+        noise = (np.roll(noise, 1, axis=0) + np.roll(noise, -1, axis=0) +
+                 np.roll(noise, 1, axis=1) + np.roll(noise, -1, axis=1) + 4*noise) / 8.0
+                 
+    x = np.linspace(0, 1, width)
+    y = np.linspace(0, 1, height)
+    X, Y = np.meshgrid(x, y)
+    
+    # Wood grain parameters
+    freq = 20.0 # Ring frequency
+    turb_power = 0.1 # Turbulence amount
+    
+    # Pattern
+    # Use distance from center for rings, or just X for straight grain
+    # Let's do straight grain with some wobble
+    pattern = np.sin(X * freq * 2 * np.pi + noise * 5.0)
+    pattern = (pattern + 1) / 2.0
+    
+    # Color mapping
+    texture = np.zeros((width, height, 3), dtype=np.float32)
+    
+    for c in range(3):
+        texture[:,:,c] = pattern * vein_color[c] + (1-pattern) * base_color[c]
+        
+    tex_data = (texture * 255).astype(np.uint8)
+    
+    tex_id = glGenTextures(1)
+    glBindTexture(GL_TEXTURE_2D, tex_id)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, tex_data)
+    
+    return tex_id
+
 def run_game(model_path=None, human_starts=True, difficulty=20, replay_file=None):
     # 1. Initialize Environment
     env = gym.make("CublinoContra-v0")
@@ -393,6 +436,18 @@ def run_game(model_path=None, human_starts=True, difficulty=20, replay_file=None
     # Generate Marble Texture
     marble_tex_id = generate_marble_texture()
 
+    # Generate Wood Textures
+    # P1: Light Wood (Oak/Pine)
+    tex_wood_p1 = generate_wood_texture(
+        base_color=np.array([0.85, 0.75, 0.55]), 
+        vein_color=np.array([0.65, 0.50, 0.30])
+    )
+    # P2: Dark Wood (Mahogany/Walnut)
+    tex_wood_p2 = generate_wood_texture(
+        base_color=np.array([0.40, 0.20, 0.10]), 
+        vein_color=np.array([0.20, 0.10, 0.05])
+    )
+
     # Helper for die logic
     _val_to_vec = {
         1: np.array([0, 0, 1]),
@@ -430,15 +485,35 @@ def run_game(model_path=None, human_starts=True, difficulty=20, replay_file=None
         bottom = 7 - top
         
         # Draw Cube
-        if p == 1:
-            glColor3f(0.8, 0.2, 0.2) # Redish
-        else:
-            glColor3f(0.2, 0.2, 0.8) # Bluish
-        glutSolidCube(0.8)
+        # Draw Cube
+        tex_id = tex_wood_p1 if p == 1 else tex_wood_p2
+        
+        glEnable(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, tex_id)
+        glColor3f(1.0, 1.0, 1.0) # White to modulate texture correctly
+        
+        s = 0.4 # Half size (0.8 total size)
+        
+        glBegin(GL_QUADS)
+        # Top (+Z)
+        glNormal3f(0, 0, 1); glTexCoord2f(0, 0); glVertex3f(-s, -s, s); glTexCoord2f(1, 0); glVertex3f(s, -s, s); glTexCoord2f(1, 1); glVertex3f(s, s, s); glTexCoord2f(0, 1); glVertex3f(-s, s, s)
+        # Bottom (-Z)
+        glNormal3f(0, 0, -1); glTexCoord2f(0, 0); glVertex3f(-s, -s, -s); glTexCoord2f(1, 0); glVertex3f(s, -s, -s); glTexCoord2f(1, 1); glVertex3f(s, s, -s); glTexCoord2f(0, 1); glVertex3f(-s, s, -s)
+        # South (-Y)
+        glNormal3f(0, -1, 0); glTexCoord2f(0, 0); glVertex3f(-s, -s, -s); glTexCoord2f(1, 0); glVertex3f(s, -s, -s); glTexCoord2f(1, 1); glVertex3f(s, -s, s); glTexCoord2f(0, 1); glVertex3f(-s, -s, s)
+        # North (+Y)
+        glNormal3f(0, 1, 0); glTexCoord2f(0, 0); glVertex3f(-s, s, -s); glTexCoord2f(1, 0); glVertex3f(s, s, -s); glTexCoord2f(1, 1); glVertex3f(s, s, s); glTexCoord2f(0, 1); glVertex3f(-s, s, s)
+        # West (-X)
+        glNormal3f(-1, 0, 0); glTexCoord2f(0, 0); glVertex3f(-s, -s, -s); glTexCoord2f(1, 0); glVertex3f(-s, s, -s); glTexCoord2f(1, 1); glVertex3f(-s, s, s); glTexCoord2f(0, 1); glVertex3f(-s, -s, s)
+        # East (+X)
+        glNormal3f(1, 0, 0); glTexCoord2f(0, 0); glVertex3f(s, -s, -s); glTexCoord2f(1, 0); glVertex3f(s, s, -s); glTexCoord2f(1, 1); glVertex3f(s, s, s); glTexCoord2f(0, 1); glVertex3f(s, -s, s)
+        glEnd()
+        
+        glDisable(GL_TEXTURE_2D)
         
         # Draw Numbers
         glColor3f(1.0, 1.0, 1.0) # White text
-        # glDisable(GL_LIGHTING) # Optional: Make text self-luminous
+        glDisable(GL_LIGHTING) # Make text self-luminous
         
         dist = 0.41
         
@@ -489,7 +564,7 @@ def run_game(model_path=None, human_starts=True, difficulty=20, replay_file=None
         draw_text_centered(str(west))
         glPopMatrix()
 
-        # glEnable(GL_LIGHTING)
+        glEnable(GL_LIGHTING)
 
 
     # 5. Define Callbacks
